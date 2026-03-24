@@ -65,6 +65,7 @@ class QueryInteractionModule(QueryInteractionBase):
         self.random_drop = args.random_drop
         self.fp_ratio = args.fp_ratio
         self.update_query_pos = args.update_query_pos
+        self.iou = args.iou
 
     def _build_layers(self, args, dim_in, hidden_dim, dim_out):
         dropout = args.merger_dropout
@@ -133,7 +134,7 @@ class QueryInteractionModule(QueryInteractionBase):
     def _select_active_tracks(self, data: dict) -> Instances:
         track_instances: Instances = data['track_instances']
         if self.training:
-            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
+            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > self.iou)
             active_track_instances = track_instances[active_idxes]
             # set -2 instead of -1 to ensure that these tracks will not be selected in matching.
             active_track_instances = self._random_drop_tracks(active_track_instances)
@@ -183,10 +184,24 @@ class QueryInteractionModule(QueryInteractionBase):
         merged_track_instances = Instances.cat([init_track_instances, active_track_instances])
         return merged_track_instances
 
+class QueryInteractionModule_P(QueryInteractionModule):
+    def _select_active_tracks(self, data: dict) -> Instances:
+        track_instances: Instances = data['track_instances']
+        if self.training:
+            active_idxes = (track_instances.obj_idxes >= 0) 
+            active_track_instances = track_instances[active_idxes]
+            # set -2 instead of -1 to ensure that these tracks will not be selected in matching.
+        else:
+            active_track_instances = track_instances[track_instances.obj_idxes >= 0]
+
+        return active_track_instances
+    
+    
 
 def build(args, layer_name, dim_in, hidden_dim, dim_out):
     interaction_layers = {
         'QIM': QueryInteractionModule,
+        'QIM_P':QueryInteractionModule_P,
     }
     assert layer_name in interaction_layers, 'invalid query interaction layer: {}'.format(layer_name)
     return interaction_layers[layer_name](args, dim_in, hidden_dim, dim_out)

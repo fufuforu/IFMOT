@@ -145,6 +145,182 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+def train_one_epoch_mot_ts(
+    model: torch.nn.Module,
+    teacher: torch.nn.Module,
+    criterion: torch.nn.Module,
+    data_loader: Iterable,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    epoch: int,
+    max_norm: float = 0
+):
+    model.train()
+    teacher.eval()   # teacher 永远 eval
+    criterion.train()
+    
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    header = f'Epoch: [{epoch}]'
+    print_freq = 10
+
+    for data_dict in metric_logger.log_every(data_loader, print_freq, header):
+        data_dict = data_dict_to_cuda(data_dict, device)
+        # data_dict.pop('gt_instances', None)
+        # =========================
+        # 1. Teacher forward (no grad)
+        # =========================
+        # import pdb;pdb.set_trace()
+        with torch.no_grad():
+            teacher_outputs = teacher(data_dict)
+        # 提取 teacher pseudo tracks
+            # print(teacher_outputs)
+           
+        pseudo_labels = teacher_outputs['pseudo_labels']
+        # import pdb;pdb.set_trace()
+        if pseudo_labels is None:
+            continue  # teacher 这一段不稳定，直接跳过
+        data_dict['pseudo_gt'] = pseudo_labels
+        # =========================
+        # 2. Student forward
+        # =========================
+        # print(data_dict['pseudo_gt'])
+        # raise RuntimeError("over")
+        outputs = model(data_dict)
+        loss_dict = criterion(outputs, data_dict)
+        # print("iter {} after model".format(cnt-1))
+        weight_dict = criterion.weight_dict
+        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        
+        # reduce losses over all GPUs for logging purposes
+        loss_dict_reduced = utils.reduce_dict(loss_dict)
+        # loss_dict_reduced_unscaled = {f'{k}_unscaled': v
+        #                               for k, v in loss_dict_reduced.items()}
+        loss_dict_reduced_scaled = {k: v * weight_dict[k]
+                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
+        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+
+        loss_value = losses_reduced_scaled.item()
+
+        if not math.isfinite(loss_value):
+            print("Loss is {}, stopping training".format(loss_value))
+            print(loss_dict_reduced)
+            sys.exit(1)
+
+        optimizer.zero_grad()
+        losses.backward()
+        if max_norm > 0:
+            grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        else:
+            grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+        optimizer.step()
+        # import pdb;pdb.set_trace()
+        # metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+        metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled)
+        # metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(grad_norm=grad_total_norm)
+
+    metric_logger.synchronize_between_processes()
+    print("Averaged stats:", metric_logger)
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+import torch.distributed as dist
+def update_dataset_progress(dataset, progress):
+    progress_tensor = torch.tensor(progress, device="cuda")
+
+    if dist.is_initialized():
+        dist.broadcast(progress_tensor, src=0)
+
+    dataset.set_progress(progress_tensor.item())
+
+def train_one_epoch_imagenet(model: torch.nn.Module, criterion: torch.nn.Module,
+                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
+                    device: torch.device, epoch: int, max_norm: float = 0,
+                    start_step = 0, sampler_lengths = [2 ,3 ,4 ,5] ):
+    model.train()
+    criterion.train()
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    # metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    header = 'Epoch: [{}]'.format(epoch)
+    print_freq = 10
+
+    global_step = start_step
+    update_interval = len(data_loader) // len(sampler_lengths)
+    total_steps = len(data_loader) 
+    # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+    for data_dict in metric_logger.log_every(data_loader, print_freq, header):
+        data_dict = data_dict_to_cuda(data_dict, device)
+        outputs = model(data_dict)
+
+
+        loss_dict = criterion(outputs, data_dict)
+        # print("iter {} after model".format(cnt-1))
+        weight_dict = criterion.weight_dict
+        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+
+        # reduce losses over all GPUs for logging purposes
+        loss_dict_reduced = utils.reduce_dict(loss_dict)
+        # loss_dict_reduced_unscaled = {f'{k}_unscaled': v
+        #                               for k, v in loss_dict_reduced.items()}
+        loss_dict_reduced_scaled = {k: v * weight_dict[k]
+                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
+        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+
+        loss_value = losses_reduced_scaled.item()
+
+        if not math.isfinite(loss_value):
+            print("Loss is {}, stopping training".format(loss_value))
+            print(loss_dict_reduced)
+            sys.exit(1)
+
+        optimizer.zero_grad()
+        losses.backward()
+        if max_norm > 0:
+            grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        else:
+            grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+        optimizer.step()
+
+        # metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+        metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled)
+        # metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(grad_norm=grad_total_norm)
+        global_step += 1
+        # import pdb;pdb.set_trace()
+
+        if global_step % update_interval == 0:
+            # checkpoint_path = output_dir / f'iteration{global_step}.pth'
+            # utils.save_on_master({
+            #     'model': model_without_ddp.state_dict(),
+            #     'optimizer': optimizer.state_dict(),
+            #     'lr_scheduler': lr_scheduler.state_dict(),
+            #     'epoch': epoch,
+            #     'args': args,
+            # }, checkpoint_path)  
+
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                progress = global_step / total_steps
+            else:
+                progress = 0.0  # dummy
+
+            if hasattr(data_loader, "sampler") and hasattr(data_loader.sampler, "set_epoch"):
+                data_loader.sampler.set_epoch(global_step)
+
+            update_dataset_progress(data_loader.dataset, progress)
+
+        
+
+
+    metric_logger.synchronize_between_processes()
+    print("Averaged stats:", metric_logger)
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, global_step
+
 
 @torch.no_grad()
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir):

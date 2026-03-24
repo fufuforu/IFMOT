@@ -36,14 +36,18 @@ class DetMOTDetection:
         self.sample_mode = args.sample_mode
         self.sample_interval = args.sample_interval
         self.video_dict = {}
-        self.split_dir = os.path.join(args.mot_path, "DanceTrack", "train")
-
+        self.split_dir = os.path.join(args.mot_path, "DanceTrack",  "images","train")
+        self.frame_interval = args.frame_interval
         self.labels_full = defaultdict(lambda : defaultdict(list))
         for vid in os.listdir(self.split_dir):
             if 'DPM' in vid or 'FRCNN' in vid:
                 print(f'filter {vid}')
                 continue
-            gt_path = os.path.join(self.split_dir, vid, 'gt', 'gt.txt')
+            if self.frame_interval is None:
+                gt_path = os.path.join(self.split_dir, vid, 'gt', 'gt.txt')
+            else:
+                sort_file = 'gt_sort_' + str(self.frame_interval) + '.txt'
+                gt_path = os.path.join(self.split_dir, vid, 'gt', sort_file)
             for l in open(gt_path):
                 t, i, *xywh, mark, label = l.strip().split(',')[:8]
                 t, i, mark, label = map(int, (t, i, mark, label))
@@ -120,7 +124,11 @@ class DetMOTDetection:
         return [img], [target]
 
     def _pre_single_frame(self, vid, idx: int):
-        img_path = os.path.join(self.split_dir, vid, 'img1', f'{idx:08d}.jpg')
+        if self.frame_interval != 0 and self.frame_interval != None:
+            img_idx = (idx-1)*self.frame_interval + 1
+            img_path = os.path.join(self.split_dir, vid, 'img1', f'{img_idx:08d}.jpg')
+        else:
+            img_path = os.path.join(self.split_dir, vid, 'img1', f'{idx:08d}.jpg')
         img = Image.open(img_path)
         targets = {}
         w, h = img._size

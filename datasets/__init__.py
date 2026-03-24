@@ -14,8 +14,17 @@ import torchvision
 from .coco import build as build_coco
 from .detmot import build as build_e2e_mot
 from .dance import build as build_e2e_dance
+from .imagenet import build as build_e2e_imagenet
+from .dance_pretrain import build as build_e2e_dance_pretrain
+from .dance_pretrain_v1 import build as build_e2e_dance_pretrain_v1
+from .dance_pretrain_v4 import build as build_e2e_dance_pretrain_v4
 from .static_detmot import build as build_e2e_static_mot
 from .joint import build as build_e2e_joint
+from .joint_aug1 import build as build_e2e_joint_aug1
+from .dance_aug1 import build as build_e2e_dance_aug1
+from .dance_aug2 import build as build_e2e_dance_aug2
+from .joint_aug2 import build as build_e2e_joint_aug2
+from .mot17_aug1_aug2 import build as build_e2e_mot17_aug1_aug2
 from .torchvision_datasets import CocoDetection
 
 def get_coco_api_from_dataset(dataset):
@@ -37,10 +46,28 @@ def build_dataset(image_set, args):
         return build_coco_panoptic(image_set, args)
     if args.dataset_file == 'e2e_joint':
         return build_e2e_joint(image_set, args)
+    if args.dataset_file == 'e2e_imagenet':
+        return build_e2e_imagenet(image_set, args)
+    if args.dataset_file == 'e2e_joint_aug1':
+        return build_e2e_joint_aug1(image_set, args)
+    if args.dataset_file == 'e2e_joint_aug2':
+        return build_e2e_joint_aug2(image_set, args)
+    if args.dataset_file == 'e2e_mot17_aug1_aug2':
+        return build_e2e_mot17_aug1_aug2(image_set, args)
     if args.dataset_file == 'e2e_static_mot':
         return build_e2e_static_mot(image_set, args)
     if args.dataset_file == 'e2e_mot':
         return build_e2e_mot(image_set, args)
     if args.dataset_file == 'e2e_dance':
         return build_e2e_dance(image_set, args)
+    if args.dataset_file == 'e2e_dance_pretrain':
+        return build_e2e_dance_pretrain(image_set, args)
+    if args.dataset_file == 'e2e_dance_pretrain_v1':
+        return build_e2e_dance_pretrain_v1(image_set, args)
+    if args.dataset_file == 'e2e_dance_pretrain_v4':
+        return build_e2e_dance_pretrain_v4(image_set, args)
+    if args.dataset_file == 'e2e_dance_aug1':
+        return build_e2e_dance_aug1(image_set, args)
+    if args.dataset_file == 'e2e_dance_aug2':
+        return build_e2e_dance_aug2(image_set, args)
     raise ValueError(f'dataset {args.dataset_file} not supported')

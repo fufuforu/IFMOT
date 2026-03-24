@@ -27,7 +27,7 @@ from util.tool import load_model
 import util.misc as utils
 import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
-from engine import evaluate, train_one_epoch, train_one_epoch_mot
+from engine import evaluate, train_one_epoch, train_one_epoch_mot, train_one_epoch_imagenet, train_one_epoch_mot_ts
 from models import build_model
 
 
@@ -124,6 +124,8 @@ def get_args_parser():
     parser.add_argument('--cls_loss_coef', default=2, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
+    parser.add_argument('--features_loss_coef', default=0.1, type=float)
+    parser.add_argument('--consistency_loss_coef', default=1000, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
 
     # dataset parameters
@@ -147,9 +149,13 @@ def get_args_parser():
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--pretrained', default=None, help='resume from checkpoint')
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
-
+    parser.add_argument('--frame_interval', default=None)
     # end-to-end mot settings.
-    parser.add_argument('--mot_path', default='/data/Dataset/mot', type=str)
+    parser.add_argument('--mot_path', default='./data/Dataset/mot', type=str)
+    # parser.add_argument('--ann_file', default='/space/mawb/MOTR/data/Datasets/mot/ImageNet/annotations/cutler_pred_fitler_0.9.json', type=str)
+    parser.add_argument('--ann_file', default='/space/mawb/MOTR/data/Dataset/mot/ImageNet/annotations/cutler_pred_fitler_0.9.json', type=str)
+    
+    parser.add_argument('--img_root', default='/space/mawb/MOTR/data/Dataset/mot/ImageNet/train', type=str)
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
     parser.add_argument('--data_txt_path_train',
                         default='./datasets/data_path/detmot17.train', type=str,
@@ -165,6 +171,7 @@ def get_args_parser():
     parser.add_argument('--sample_interval', type=int, default=1)
     parser.add_argument('--random_drop', type=float, default=0)
     parser.add_argument('--fp_ratio', type=float, default=0)
+    parser.add_argument('--iou', type=float, default=0.5)
     parser.add_argument('--merger_dropout', type=float, default=0.1)
     parser.add_argument('--update_query_pos', action='store_true')
 
@@ -175,8 +182,23 @@ def get_args_parser():
     parser.add_argument('--memory_bank_len', type=int, default=4)
     parser.add_argument('--memory_bank_type', type=str, default=None)
     parser.add_argument('--memory_bank_with_self_attn', action='store_true', default=False)
-
+    parser.add_argument('--data_ratio', type=float, default=0.5)
+    parser.add_argument('--soft_match', type=float, default=0.5)
     parser.add_argument('--use_checkpoint', action='store_true', default=False)
+
+    parser.add_argument('--feature_recon', action='store_true', help='if set, add feature reconstruction branch')
+    parser.add_argument('--query_shuffle', action='store_true', help='if set, shuffle object queries')
+    parser.add_argument('--fre_cnn', action='store_true',
+                        help="if set, freeze cnn parameters during the pre-training")
+    parser.add_argument('--num_patches', default=10, type=int,
+                    help="Number of patch slots")
+    parser.add_argument('--num_pictures_row', default=3, type=int,
+                        help="Number of pictures each row")
+    parser.add_argument('--num_pictures_column', default=3, type=int,
+                        help="Number of pictures each column")
+    parser.add_argument('--pseudo_shuffle', default=True,  help='whether to shuffle')
+    parser.add_argument('--consistency_loss', action='store_true')
+    parser.add_argument('--teacher', action='store_true')
     return parser
 
 
@@ -186,6 +208,8 @@ def main(args):
 
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
+    # freeze cnn weights
+    args.lr_backbone = 0 if args.fre_cnn else args.lr
     print(args)
 
     device = torch.device(args.device)
@@ -219,7 +243,7 @@ def main(args):
 
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True)
-    if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
+    if args.dataset_file in ['e2e_mot', 'e2e_imagenet','e2e_dance_pretrain','e2e_dance_pretrain_v1','e2e_dance_pretrain_v4','e2e_dance_aug1','e2e_dance_aug2','e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
         collate_fn = utils.mot_collate_fn
     else:
         collate_fn = utils.collate_fn
@@ -280,6 +304,15 @@ def main(args):
     if args.pretrained is not None:
         model_without_ddp = load_model(model_without_ddp, args.pretrained)
 
+    if args.teacher:
+        teacher, _ , _  = build_model(args)
+        teacher.to(device)
+
+        teacher.is_teacher = True
+        teacher.load_state_dict(model_without_ddp.state_dict(), strict=True)
+        for p in teacher.parameters():
+            p.requires_grad = False
+
     output_dir = Path(args.output_dir)
     if args.resume:
         if args.resume.startswith('https'):
@@ -322,15 +355,33 @@ def main(args):
     start_time = time.time()
 
     train_func = train_one_epoch
-    if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
-        train_func = train_one_epoch_mot
-        dataset_train.set_epoch(args.start_epoch)
-        dataset_val.set_epoch(args.start_epoch)
+    if args.dataset_file in ['e2e_mot', 'e2e_dance_pretrain','e2e_dance_pretrain_v1','e2e_dance_pretrain_v4','e2e_dance_aug1','e2e_dance_aug2', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
+        if args.teacher :
+            train_func = train_one_epoch_mot_ts
+            dataset_train.set_epoch(args.start_epoch)
+            dataset_val.set_epoch(args.start_epoch)
+        else:
+            train_func = train_one_epoch_mot
+            dataset_train.set_epoch(args.start_epoch)
+            dataset_val.set_epoch(args.start_epoch)
+    elif args.dataset_file in ['e2e_imagenet']:
+        train_func = train_one_epoch_imagenet
+        global_step = 0
+        dataset_train.set_progress(global_step)
+        dataset_val.set_progress(global_step)
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
-        train_stats = train_func(
-            model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+        if args.dataset_file in ['e2e_imagenet']:
+            train_stats = train_func(
+                model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm,  global_step, args.sampler_lengths)
+        else:
+            if args.teacher :
+                train_stats = train_func(
+                model, teacher, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+            else:
+                train_stats = train_func(
+                model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -344,9 +395,9 @@ def main(args):
                     'lr_scheduler': lr_scheduler.state_dict(),
                     'epoch': epoch,
                     'args': args,
-                }, checkpoint_path)
-        
-        if args.dataset_file not in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
+                }, checkpoint_path)  
+
+        if args.dataset_file not in ['e2e_mot','e2e_imagenet', 'e2e_dance_pretrain','e2e_dance_pretrain_v1','e2e_dance_pretrain_v4','e2e_dance_aug1', 'e2e_dance_aug2','e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
@@ -370,7 +421,7 @@ def main(args):
                         for name in filenames:
                             torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                        output_dir / "eval" / name)
-        if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
+        if args.dataset_file in ['e2e_mot',  'e2e_dance_pretrain','e2e_dance_pretrain_v1','e2e_dance_pretrain_v4','e2e_dance_aug1','e2e_dance_aug2','e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
             dataset_train.step_epoch()
             dataset_val.step_epoch()
     total_time = time.time() - start_time

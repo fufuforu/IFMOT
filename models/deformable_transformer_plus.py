@@ -178,6 +178,7 @@ class DeformableTransformer(nn.Module):
             pos_trans_out = self.pos_trans_norm(self.pos_trans(self.get_proposal_pos_embed(topk_coords_unact)))
             query_embed, tgt = torch.split(pos_trans_out, c, dim=2)
         else:
+            # import pdb;pdb.set_trace()
             query_embed, tgt = torch.split(query_embed, c, dim=1)
             query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1)
             tgt = tgt.unsqueeze(0).expand(bs, -1, -1)
@@ -431,6 +432,14 @@ class DeformableTransformerDecoder(nn.Module):
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
+def pos2posemb(pos, num_pos_feats=64, temperature=10000):
+    scale = 2 * math.pi
+    pos = pos * scale
+    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
+    dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
+    posemb = pos[..., None] / dim_t
+    posemb = torch.stack((posemb[..., 0::2].sin(), posemb[..., 1::2].cos()), dim=-1).flatten(-3)
+    return posemb
 
 def _get_activation_fn(activation):
     """Return an activation function given a string"""

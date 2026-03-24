@@ -195,7 +195,8 @@ def dice_loss(inputs, targets, num_boxes):
     return loss.sum() / num_boxes
 
 
-def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, mean_in_dim1=True):
+def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, mean_in_dim1=True,
+                       return_per_query_loss = False):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -220,9 +221,15 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
     if mean_in_dim1:
-        return loss.mean(1).sum() / num_boxes
+        if return_per_query_loss:
+            return loss.mean(1) / num_boxes
+        else:
+            return loss.mean(1).sum() / num_boxes
     else:
-        return loss.sum() / num_boxes
+        if return_per_query_loss:
+            return loss / num_boxes
+        else:
+            return loss.sum() / num_boxes
 
 
 class PostProcessSegm(nn.Module):

@@ -1,14 +1,11 @@
-# ------------------------------------------------------------------------
-# Copyright (c) 2021 megvii-model. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
-# Copyright (c) 2020 SenseTime. All Rights Reserved.
-# ------------------------------------------------------------------------
-
+#!/usr/bin/env bash
+#SBATCH --partition=4090
+#SBATCH --nodelist=3dimage-14
+#SBATCH --gres=gpu:8
 
 # for MOT17
 
-PRETRAIN=r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint.pth
+PRETRAIN=r50_deformable_detr-checkpoint.pth
 EXP_DIR=exps/e2e_motr_r50_dance
 python3 -m torch.distributed.launch --nproc_per_node=8 \
     --use_env main.py \
@@ -36,4 +33,5 @@ python3 -m torch.distributed.launch --nproc_per_node=8 \
     --extra_track_attn \
     --data_txt_path_train ./datasets/data_path/joint.train \
     --data_txt_path_val ./datasets/data_path/mot17.train \
+    --mot_path /space/mawb/MOTR/data/Dataset/mot
     |& tee ${EXP_DIR}/output.log

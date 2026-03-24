@@ -554,6 +554,8 @@ class MOTR(nn.Module):
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         track_instances.output_embedding = frame_res['hs'][0]
         if self.training:
+            print((track_instances.scores>0.5).sum())
+            raise RuntimeError("over")
             # the track id will be assigned by the mather.
             frame_res['track_instances'] = track_instances
             track_instances = self.criterion.match_for_single_frame(frame_res)
@@ -660,7 +662,11 @@ def build(args):
         'coco_panoptic': 250,
         'e2e_mot': 1,
         'e2e_dance': 1,
+        'e2e_dance_aug1': 1,
+        'e2e_dance_pretrain_v4': 1,
         'e2e_joint': 1,
+        'e2e_joint_aug1': 1,
+        'e2e_joint_aug2': 1,
         'e2e_static_mot': 1,
     }
     assert args.dataset_file in dataset_to_num_classes

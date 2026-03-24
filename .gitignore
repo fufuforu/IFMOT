@@ -6,3 +6,5 @@ build/
 *.egg
 *.egg-info
 *.mp4
+outputs/
+exps/

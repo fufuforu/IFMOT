@@ -15,14 +15,20 @@ import copy
 import random
 import PIL
 import torch
+import torchvision
 import torchvision.transforms as T
+import torchvision.transforms.v2 as Tv2
 import torchvision.transforms.functional as F
+import torchvision.transforms.v2.functional as Fv2
 from PIL import Image, ImageDraw
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
 import numpy as np
 import os 
-
+from typing import Any, Dict, List, Optional, Callable, Union, cast
+from torchvision.transforms.v2.utils import query_bounding_box, query_spatial_size
+from torch.utils._pytree import tree_flatten, tree_unflatten
+from torchvision import datapoints
 
 
 def crop_mot(image, target, region):
@@ -589,3 +595,383 @@ class MotCompose(Compose):
         for t in self.transforms:
             imgs, targets = t(imgs, targets)
         return imgs, targets
+
+class RandomZoomOut(Tv2.RandomZoomOut):
+
+    def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        orig_h, orig_w = query_spatial_size(flat_inputs)
+
+        r = self.side_range[0] + torch.rand(1) * (self.side_range[1] - self.side_range[0])
+        canvas_width = int(orig_w * r)
+        canvas_height = int(orig_h * r)
+
+        r = torch.rand(2)
+        left = int((canvas_width - orig_w) * r[0])
+        top = int((canvas_height - orig_h) * r[1])
+        right = canvas_width - (left + orig_w)
+        bottom = canvas_height - (top + orig_h)
+        padding = [left, top, right, bottom]
+
+        params = {
+            'padding': padding,
+            'needs_pad': torch.rand(1) >= self.p
+        }
+
+        return params
+
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+
+        if not params['needs_pad']:
+            return inpt
+        else:
+            params_ = copy.deepcopy(params)
+            params_.pop('needs_pad')
+            return super()._transform(inpt, params_)
+
+    def forward(self, *inputs: Any) -> Any:
+        # We need to almost duplicate `Transform.forward()` here since we always want to check the inputs, but return
+        # early afterwards in case the random check triggers. The same result could be achieved by calling
+        # `super().forward()` after the random check, but that would call `self._check_inputs` twice.
+
+        inputs = inputs if len(inputs) > 1 else inputs[0]
+        flat_inputs, spec = tree_flatten(inputs)
+
+        self._check_inputs(flat_inputs)
+
+        needs_transform_list = self._needs_transform_list(flat_inputs)
+        params = self._get_params(
+            [inpt for (inpt, needs_transform) in zip(flat_inputs, needs_transform_list) if needs_transform]
+        )
+
+        flat_outputs = [
+            self._transform(inpt, params) if needs_transform else inpt
+            for (inpt, needs_transform) in zip(flat_inputs, needs_transform_list)
+        ]
+
+        return tree_unflatten(flat_outputs, spec)
+
+
+class RandomPerspective(Tv2.RandomPerspective):
+    def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        params = super()._get_params(flat_inputs)
+        params['needs_perspective'] = torch.rand(1) >= self.p
+        return params
+    
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+
+        if not params['needs_perspective']:
+            return inpt
+        else:
+            params_ = copy.deepcopy(params)
+            params_.pop('needs_perspective')
+            return super()._transform(inpt, params_)
+
+    def forward(self, *inputs: Any) -> Any:
+        # We need to almost duplicate `Transform.forward()` here since we always want to check the inputs, but return
+        # early afterwards in case the random check triggers. The same result could be achieved by calling
+        # `super().forward()` after the random check, but that would call `self._check_inputs` twice.
+
+        inputs = inputs if len(inputs) > 1 else inputs[0]
+        flat_inputs, spec = tree_flatten(inputs)
+
+        self._check_inputs(flat_inputs)
+
+        needs_transform_list = self._needs_transform_list(flat_inputs)
+        params = self._get_params(
+            [inpt for (inpt, needs_transform) in zip(flat_inputs, needs_transform_list) if needs_transform]
+        )
+
+        flat_outputs = [
+            self._transform(inpt, params) if needs_transform else inpt
+            for (inpt, needs_transform) in zip(flat_inputs, needs_transform_list)
+        ]
+
+        return tree_unflatten(flat_outputs, spec)
+
+class RandomIoUCrop(Tv2.RandomIoUCrop):
+    def __init__(self, min_scale: float = 0.3, max_scale: float = 1, min_aspect_ratio: float = 0.5, max_aspect_ratio: float = 2, sampler_options: Optional[List[float]] = None, trials: int = 40, p: float = 1.0):
+        super().__init__(min_scale, max_scale, min_aspect_ratio, max_aspect_ratio, sampler_options, trials)
+        self.p = p 
+
+    def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        params = {}
+        params['needs_crop'] = torch.rand(1) >= self.p # RandomCrop also has the key 'needs_crop'
+        if params['needs_crop']:
+            p = super()._get_params(flat_inputs)
+            params.update(p)
+            if len(p) == 0: # all trials are failed
+                params['needs_crop'] = False
+
+        return params
+
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+
+        if not params['needs_crop']:
+            return inpt
+        else:
+            return super()._transform(inpt, params)
+
+class SanitizeBoundingBox(Tv2.SanitizeBoundingBox):
+    def __init__(self, *args, labels_getter=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._labels_getter = labels_getter
+    def forward(self, *inputs: Any) -> Any:
+        #import pdb; pdb.set_trace()
+        inputs = inputs if len(inputs) > 1 else inputs[0]
+        # import pdb; pdb.set_trace()
+        if self._labels_getter is None:
+            labels = None
+        else:
+            labels = self._labels_getter(inputs)
+        
+        # import pdb; pdb.set_trace()
+        if labels is not None:
+            msg = "The labels in the input to forward() must be a tensor or None, got {type} instead."
+            if isinstance(labels, torch.Tensor):
+                labels = (labels,)
+            elif isinstance(labels, (tuple, list)):
+                for entry in labels:
+                    if not isinstance(entry, torch.Tensor):
+                        # TODO: we don't need to enforce tensors, just that entries are indexable as t[bool_mask]
+                        raise ValueError(msg.format(type=type(entry)))
+            else:
+                raise ValueError(msg.format(type=type(labels)))
+
+        flat_inputs, spec = tree_flatten(inputs)
+        #import pdb; pdb.set_trace()
+        # TODO: this enforces one single BoundingBox entry.
+        # Assuming this transform needs to be called at the end of *any* pipeline that has bboxes...
+        # should we just enforce it for all transforms?? What are the benefits of *not* enforcing this?
+        boxes = query_bounding_box(flat_inputs)
+
+        if boxes.ndim != 2:
+            raise ValueError(f"boxes must be of shape (num_boxes, 4), got {boxes.shape}")
+
+        if labels is not None:
+            for label in labels:
+                if boxes.shape[0] != label.shape[0]:
+                    raise ValueError(
+                        f"Number of boxes (shape={boxes.shape}) and must match the number of labels."
+                        f"Found labels with shape={label.shape})."
+                    )
+
+        boxes = cast(
+            datapoints.BoundingBox,
+            Fv2.convert_format_bounding_box(
+                boxes,
+                new_format=datapoints.BoundingBoxFormat.XYXY,
+            ),
+        )
+        ws, hs = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
+        valid = (ws >= self.min_size) & (hs >= self.min_size) & (boxes >= 0).all(dim=-1)
+        # TODO: Do we really need to check for out of bounds here? All
+        # transforms should be clamping anyway, so this should never happen?
+        image_h, image_w = boxes.spatial_size
+        valid &= (boxes[:, 0] <= image_w) & (boxes[:, 2] <= image_w)
+        valid &= (boxes[:, 1] <= image_h) & (boxes[:, 3] <= image_h)
+
+        params = dict(valid=valid, labels=labels)  
+        flat_outputs = [
+            # Even-though it may look like we're transforming all inputs, we don't:
+            # _transform() will only care about BoundingBoxes and the labels
+            self._transform(inpt, params)
+            for inpt in flat_inputs
+        ]
+        outputs = tree_unflatten(flat_outputs, spec)
+
+        return outputs
+
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        is_label = params["labels"] is not None and any(inpt is label for label in params["labels"])
+        is_bounding_box_or_mask = isinstance(inpt, (datapoints.BoundingBox, datapoints.Mask))
+
+        if not (is_label or is_bounding_box_or_mask):
+            return inpt
+
+        output = inpt[params["valid"]]
+
+        if is_label:
+            return output
+
+        return type(inpt).wrap_like(inpt, output)
+
+class RandomHorizontalFlipv2(Tv2.RandomHorizontalFlip):
+    
+    def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        params = {}
+        params['needs_flip'] = torch.rand(1) >= self.p
+        return params
+    
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+
+        if not params['needs_flip']:
+            return inpt
+        else:
+            return super()._transform(inpt, params)
+
+    def forward(self, *inputs: Any) -> Any:
+        # We need to almost duplicate `Transform.forward()` here since we always want to check the inputs, but return
+        # early afterwards in case the random check triggers. The same result could be achieved by calling
+        # `super().forward()` after the random check, but that would call `self._check_inputs` twice.
+
+        inputs = inputs if len(inputs) > 1 else inputs[0]
+        flat_inputs, spec = tree_flatten(inputs)
+
+        self._check_inputs(flat_inputs)
+
+        needs_transform_list = self._needs_transform_list(flat_inputs)
+        params = self._get_params(
+            [inpt for (inpt, needs_transform) in zip(flat_inputs, needs_transform_list) if needs_transform]
+        )
+
+        flat_outputs = [
+            self._transform(inpt, params) if needs_transform else inpt
+            for (inpt, needs_transform) in zip(flat_inputs, needs_transform_list)
+        ]
+
+        return tree_unflatten(flat_outputs, spec)
+
+class ConvertBox(Tv2.Transform):
+    _transformed_types = (
+        datapoints.BoundingBox,
+    )
+    def __init__(self, out_fmt='', normalize=False) -> None:
+        super().__init__()
+        self.out_fmt = out_fmt
+        self.normalize = normalize
+
+        self.data_fmt = {
+            'xyxy': datapoints.BoundingBoxFormat.XYXY,
+            'cxcywh': datapoints.BoundingBoxFormat.CXCYWH
+        }
+
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:  
+        if self.out_fmt:
+            spatial_size = inpt.spatial_size
+            in_fmt = inpt.format.value.lower()
+            inpt = torchvision.ops.box_convert(inpt, in_fmt=in_fmt, out_fmt=self.out_fmt)
+            inpt = datapoints.BoundingBox(inpt, format=self.data_fmt[self.out_fmt], spatial_size=spatial_size)
+        
+        if self.normalize:
+            inpt = inpt / torch.tensor(inpt.spatial_size[::-1]).tile(2)[None]
+
+        return inpt
+
+def labels_getter_func_for_mot_in_SanitizeBoundingBox(inputs):
+    targets = inputs[1] # image, targets
+    labels = []
+    # import pdb;pdb.set_trace()
+    for k in ['labels', 'obj_ids', 'area', 'iscrowd']:
+        labels.append(targets[k])
+    return tuple(labels)
+
+def mot_transform_wrap(transform_class, **args):
+    class MOTTransformWrapper(transform_class):
+        def __init__(self, **args):
+            super().__init__(**args)
+            self.__class__.__name__ = 'MOT_{}'.format(transform_class.__name__) #TODO: '{}_{}'.format('MOTTransformWrapper', transform_class.__name__)
+            self.parent_class_name = transform_class.__name__
+            self._params_ = None
+        
+        def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+            
+            if self._params_ is None:
+                self._params_ = super()._get_params(flat_inputs)
+
+            params = copy.deepcopy(self._params_)
+
+            if self.parent_class_name in ['RandomIoUCrop']:
+                # import pdb; pdb.set_trace()
+                if params['needs_crop']: # we need to check if one box is within the image
+                    bboxes = flat_inputs[1]
+                    assert isinstance(bboxes, (datapoints.BoundingBox,)), 'Not Boxes!'
+                    xyxy_bboxes = Fv2.convert_format_bounding_box(
+                                    bboxes.as_subclass(torch.Tensor), bboxes.format, datapoints.BoundingBoxFormat.XYXY
+                                )
+                    cx = 0.5 * (xyxy_bboxes[..., 0] + xyxy_bboxes[..., 2])
+                    cy = 0.5 * (xyxy_bboxes[..., 1] + xyxy_bboxes[..., 3])
+                    left, new_h, top, new_w = params['left'], params['height'], params['top'], params['width'], 
+                    right = left + new_w
+                    bottom = top + new_h
+                    is_within_crop_area = (left < cx) & (cx < right) & (top < cy) & (cy < bottom)
+                    params['is_within_crop_area'] = is_within_crop_area
+                    
+            return params
+        
+        def forward(self, *inputs: Any) -> Any:
+
+            # if self.parent_class_name in ['SanitizeBoundingBox']:
+                # import pdb; pdb.set_trace()
+            self._params_ = None
+            inputs = inputs if len(inputs) > 1 else inputs[0]
+            outputs = []
+            #import pdb; pdb.set_trace()
+            for inp in inputs:
+                
+                output = super().forward(inp)
+                outputs.append(output)
+
+            return outputs
+
+    return MOTTransformWrapper(**args)
+
+class Transforms_Image(object):
+    def __init__(self, bs=1):
+        self.bs = bs
+
+    def __call__(self, imgs: list, targets: list):
+        video = []
+        for i in range(self.bs):
+            video.append((imgs[0], targets[0]))
+        #import pdb;pdb.set_trace()
+        randomaffine = Tv2.RandomAffine(degrees=1, translate=[0.05, 0.05], fill=255)
+        resize = Tv2.Resize(size=[640, 640], antialias=False)
+        for i in range(self.bs):
+            video[i] = randomaffine(video[i])
+            video[i] = resize(video[i])
+        return video
+        
+    
+class Transforms_Video(Transforms_Image):
+    def __call__(self, video: list):
+        
+        #randomzoomout = RandomZoomOut(fill=255)
+        randomzoomout = mot_transform_wrap(RandomZoomOut,fill=255)
+        randomperspective = mot_transform_wrap(RandomPerspective,distortion_scale=0.5, p=0.5, fill=255)
+        randomaffine = mot_transform_wrap(Tv2.RandomAffine,degrees=10, translate=[0.3, 0.3], scale=[0.75, 1.5],fill=255)
+
+        randomchoice = Tv2.RandomChoice(
+            transforms=[
+                randomzoomout,
+                randomperspective,
+                randomaffine
+            ],
+            p=[0.5, 0.25, 0.25]  # 必须加起来等于1
+        )
+        video = randomchoice(video)
+
+        randomioucrop = mot_transform_wrap(RandomIoUCrop,
+                                            # min_scale=0.1,
+                                            # max_scale=0.5,
+                                            # min_aspect_ratio=0.3,
+                                            # max_aspect_ratio=3.3,
+                                            # sampler_options=[0.0, 0.1, 0.3],  # 允许低 IOU，可能完全丢失目标
+                                            p=0.8)
+        sanitizeboundingbox = mot_transform_wrap(SanitizeBoundingBox,min_size=1,labels_getter=labels_getter_func_for_mot_in_SanitizeBoundingBox)
+        randomhorizontalfilpv2 = mot_transform_wrap(RandomHorizontalFlipv2)
+        resize = mot_transform_wrap(Tv2.Resize,size=[640, 640], antialias=False)
+
+        #import pdb;pdb.set_trace()
+        video = randomioucrop(video)
+        video = sanitizeboundingbox(video)
+        video = randomhorizontalfilpv2(video)
+        video = resize(video)
+        #import pdb;pdb.set_trace()
+        #video = mottotensor(video)
+        # video = normalize(video)
+        # video = sanitizeboundingbox(video)
+        # video = convertbox(video)
+        #import pdb;pdb.set_trace()
+        images, targets = zip(*video)
+        return list(images), list(targets)
+    

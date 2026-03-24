@@ -83,13 +83,18 @@ class BackboneBase(nn.Module):
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
 
     def forward(self, tensor_list: NestedTensor):
-        xs = self.body(tensor_list.tensors)
-        out: Dict[str, NestedTensor] = {}
-        for name, x in xs.items():
-            m = tensor_list.mask
-            assert m is not None
-            mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
-            out[name] = NestedTensor(x, mask)
+        """supports both NestedTensor and torch.Tensor
+        """
+        if isinstance(tensor_list, NestedTensor):
+            xs = self.body(tensor_list.tensors)
+            out: Dict[str, NestedTensor] = {}
+            for name, x in xs.items():
+                m = tensor_list.mask
+                assert m is not None
+                mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+                out[name] = NestedTensor(x, mask)
+        else:
+            out = self.body(tensor_list)
         return out
 
 
@@ -116,17 +121,19 @@ class Joiner(nn.Sequential):
         self.num_channels = backbone.num_channels
 
     def forward(self, tensor_list: NestedTensor):
-        xs = self[0](tensor_list)
-        out: List[NestedTensor] = []
-        pos = []
-        for name, x in sorted(xs.items()):
-            out.append(x)
-
-        # position encoding
-        for x in out:
-            pos.append(self[1](x).to(x.tensors.dtype))
-
-        return out, pos
+        """supports both NestedTensor and torch.Tensor
+        """
+        if isinstance(tensor_list, NestedTensor):
+            xs = self[0](tensor_list)
+            out: List[NestedTensor] = []
+            pos = []
+            for name, x in xs.items():
+                out.append(x)
+                # position encoding
+                pos.append(self[1](x).to(x.tensors.dtype))
+            return out, pos
+        else:
+            return list(self[0](tensor_list).values())
 
 
 def build_backbone(args):
