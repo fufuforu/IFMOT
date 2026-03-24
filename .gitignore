@@ -8,3 +8,4 @@ build/
 *.mp4
 outputs/
 exps/
+data/
