@@ -33,6 +33,7 @@ class DetMOTDetection:
         self.vis = args.vis
         self.video_dict = {}
         self.frame_interval = args.frame_interval
+        # print(data_txt_path)
         with open(data_txt_path, 'r') as file:
             self.img_files = file.readlines()
             self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
@@ -113,16 +114,17 @@ class DetMOTDetection:
     def _pre_single_frame(self, idx: int):
         img_path = self.img_files[idx]
         label_path = self.label_files[idx]
+        # import pdb;pdb.set_trace()
         if 'crowdhuman' in img_path:
             
-            img_path = img_path.replace('val/','').replace('crowdhuman/images','crowdhuman/Images')
-            label_path = label_path.replace('val/','').replace('crowdhuman/','crowdhuman_')
-        elif 'Crowdhuman' in img_path:
-            img_path = img_path.replace('val/','').replace('Crowdhuman/images','crowdhuman/Images')
-            label_path = label_path.replace('val/','').replace('Crowdhuman/','crowdhuman_')
+            img_path = img_path.replace('val/','') #.replace('crowdhuman/images','crowdhuman/Images')
+            label_path = label_path.replace('val/','') .replace('crowdhuman_','crowdhuman/')
+        # elif 'Crowdhuman' in img_path:
+        #     img_path = img_path.replace('val/','').replace('Crowdhuman/images','crowdhuman/Images')
+        #     label_path = label_path.replace('val/','').replace('Crowdhuman/','crowdhuman_')
         else:
-            img_path = img_path.replace('images/','')
-            label_path = label_path.replace('MOT17/','MOT17_')
+            # img_path = img_path.replace('images/','')
+            label_path = label_path.replace('MOT17_','MOT17/')
         img = Image.open(img_path)
         targets = {}
         w, h = img._size
@@ -140,7 +142,8 @@ class DetMOTDetection:
             raise ValueError('invalid label path: {}'.format(label_path))
         if 'MOT17' in img_path:
             video_name = '/'.join(label_path.split('/')[:-1])
-            obj_idx_offset = self.video_dict[video_name] * 1000000  # 1000000 unique ids is enough for a video.
+            obj_idx_offset = 1000000
+            # obj_idx_offset = self.video_dict[video_name] * 1000000  # 1000000 unique ids is enough for a video.
         else:
             obj_idx_offset = 1000000  #crowdhuman
         if 'crowdhuman' in img_path:

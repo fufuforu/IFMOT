@@ -9,3 +9,5 @@ build/
 outputs/
 exps/
 data/
+configs/
+datasets/
