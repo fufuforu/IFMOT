@@ -1097,7 +1097,7 @@ class MOTR(nn.Module):
         if self.training:
             self.criterion.initialize_for_single_clip(data['gt_instances'])
         frames = data['imgs']  # list of Tensor.
-        import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()
         gt_instances = data['gt_instances']
         outputs = {
             'pred_logits': [],
@@ -1144,7 +1144,7 @@ class MOTR(nn.Module):
             self.box_features = self.extract_box_feature(self.features_before_decoder, gt)
 
             is_MOT17 = data['dataset'][0] == 1
-            print(is_MOT17)
+            # print(is_MOT17)
             if is_first:
                 frame_res = self._post_process_single_image(frame_res, track_instances, 'first_frame', is_last)
             else:
@@ -1160,10 +1160,10 @@ class MOTR(nn.Module):
             track_instances_list.append(track_instances)
             # import pdb;pdb.set_trace()
         # 可视化 begin
-        from .visualizer import ImageVisualizer
-        visualizer = ImageVisualizer(denormalized=True)
-        visualizer.show(data['imgs'], track_instances_list ,box_format='cxcywh')
-        import pdb;pdb.set_trace()
+        # from .visualizer import ImageVisualizer
+        # visualizer = ImageVisualizer(denormalized=True)
+        # visualizer.show(data['imgs'], track_instances_list ,box_format='cxcywh')
+        # import pdb;pdb.set_trace()
         # 可视化 end
         if not self.training:
             outputs['track_instances'] = track_instances

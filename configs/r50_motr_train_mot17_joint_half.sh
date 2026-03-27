@@ -1,18 +1,14 @@
-#!/usr/bin/env bash
-#SBATCH --partition=4090
-#SBATCH --nodelist=3dimage-14
-#SBATCH --gres=gpu:8
 
 # for MOT17
 
-PRETRAIN=coco_model_final.pth
+PRETRAIN=./exps/e2e_motr_r50_joint_aug1_half/checkpoint.pth
 EXP_DIR=exps/e2e_motr_r50_mot17_joint_half
-python3 -m torch.distributed.launch --nproc_per_node=8 \
+python3 -m torch.distributed.launch --nproc_per_node=4 \
     --use_env main.py \
     --meta_arch motr \
     --use_checkpoint \
     --dataset_file e2e_joint \
-    --epoch 200 \
+    --epoch 1 \
     --with_box_refine \
     --lr_drop 100 \
     --lr 2e-4 \
@@ -33,4 +29,4 @@ python3 -m torch.distributed.launch --nproc_per_node=8 \
     --extra_track_attn \
     --data_txt_path_train ./datasets/data_path/joint_half.train \
     --data_txt_path_val ./datasets/data_path/mot17.train \
-    --mot_path /space/mawb/MOTR/data/Dataset/mot \
+    --mot_path ./data/Datasets/mot 

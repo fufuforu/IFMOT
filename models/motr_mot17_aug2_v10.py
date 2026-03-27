@@ -600,9 +600,9 @@ class ClipMatcher(SetCriterion):
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
                 
         # 计算特征间的对比学习 Loss
-        new_feature_loss = self.get_features_loss(box_features, last_box_features)
-        self.losses_dict.update(
-                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_feature_loss.items()})
+        # new_feature_loss = self.get_features_loss(box_features, last_box_features)
+        # self.losses_dict.update(
+        #         {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_feature_loss.items()})
 
         # 计算 Auxiliary Outputs Loss
         if 'aux_outputs' in outputs:
