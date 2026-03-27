@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-#SBATCH --partition=3090
-#SBATCH --nodelist=3dimage-13
+#SBATCH --partition=4090
+#SBATCH --nodelist=3dimage-17
 #SBATCH --gres=gpu:8
 
 # for MOT17

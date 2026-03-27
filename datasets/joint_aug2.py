@@ -32,27 +32,27 @@ class DetMOTDetection:
         self.sample_interval = args.sample_interval
         self.vis = args.vis
         self.video_dict = {}
-        self.frame_interval = args.frame_interval
+        # self.frame_interval = args.frame_interval
         with open(data_txt_path, 'r') as file:
             self.img_files = file.readlines()
             self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
             self.img_files = list(filter(lambda x: len(x) > 0, self.img_files))
-        def is_keep(p):
-            name = osp.basename(p).split('.')[0]
-            # import pdb;pdb.set_trace()
-            if "crowdhuman" in p.lower():
-                return True
-            if not name.isdigit():
-                return False  # 避免 int() 报错
+        # def is_keep(p):
+        #     name = osp.basename(p).split('.')[0]
+        #     # import pdb;pdb.set_trace()
+        #     if "crowdhuman" in p.lower():
+        #         return True
+        #     if not name.isdigit():
+        #         return False  # 避免 int() 报错
 
-            # 3. 判断 frame_interval
-            idx = int(name)
-            return (idx - 1) % self.frame_interval == 0
-        if self.frame_interval is not None:
-            self.img_files = [
-                    p for p in self.img_files 
-                    if is_keep(p)
-                ]
+        #     # 3. 判断 frame_interval
+        #     idx = int(name)
+        #     return (idx - 1) % self.frame_interval == 0
+        # if self.frame_interval is not None:
+        #     self.img_files = [
+        #             p for p in self.img_files 
+        #             if is_keep(p)
+        #         ]
         self.label_files = [(x.replace('/images', '_labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
                             for x in self.img_files]
         # The number of images per sample: 1 + (num_frames - 1) * interval.

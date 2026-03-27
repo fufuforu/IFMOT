@@ -32,34 +32,34 @@ class DetMOTDetection:
         self.sample_interval = args.sample_interval
         self.vis = args.vis
         self.video_dict = {}
-        self.frame_interval = args.frame_interval
+        # self.frame_interval = args.frame_interval
         with open(data_txt_path, 'r') as file:
             self.img_files = file.readlines()
             self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
             self.img_files = list(filter(lambda x: len(x) > 0, self.img_files))
-        def is_keep(p):
-            name = osp.basename(p).split('.')[0]
-            # import pdb;pdb.set_trace()
-            if "crowdhuman" in p.lower():
-                return True
-            if not name.isdigit():
-                return False  # 避免 int() 报错
-            idx = int(name)
-            return (idx - 1) % self.frame_interval == 0
-        if self.frame_interval is not None:
-            self.img_files = [
-                    p for p in self.img_files 
-                    if is_keep(p)
-                ]
+        # def is_keep(p):
+        #     name = osp.basename(p).split('.')[0]
+        #     # import pdb;pdb.set_trace()
+        #     if "crowdhuman" in p.lower():
+        #         return True
+        #     if not name.isdigit():
+        #         return False  # 避免 int() 报错
+        #     idx = int(name)
+        #     return (idx - 1) % self.frame_interval == 0
+        # if self.frame_interval is not None:
+        #     self.img_files = [
+        #             p for p in self.img_files 
+        #             if is_keep(p)
+        #         ]
         self.label_files = [(x.replace('/images', '_labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
                             for x in self.img_files]
-        if self.frame_interval is not None :
-            # Adjust the label files to match the frame interval.
-            self.label_files = [
-                x if "crowdhuman" in x.lower()
-                else x.replace('.txt', f'_gt_sort_{self.frame_interval}.txt')
-                for x in self.label_files
-            ]
+        # if self.frame_interval is not None :
+        #     # Adjust the label files to match the frame interval.
+        #     self.label_files = [
+        #         x if "crowdhuman" in x.lower()
+        #         else x.replace('.txt', f'_gt_sort_{self.frame_interval}.txt')
+        #         for x in self.label_files
+        #     ]
         # The number of images per sample: 1 + (num_frames - 1) * interval.
         # The number of valid samples: num_images - num_image_per_sample + 1.
         self.item_num = len(self.img_files) - (self.num_frames_per_batch - 1) * self.sample_interval
@@ -137,11 +137,11 @@ class DetMOTDetection:
 
             # normalized cewh to pixel xyxy format
             labels = labels0.copy()
-            if self.frame_interval is None or 'crowdhuman' in label_path: 
-                labels[:, 2] = w * (labels0[:, 2] - labels0[:, 4] / 2)
-                labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
-                labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
-                labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
+            # if self.frame_interval is None or 'crowdhuman' in label_path: 
+            labels[:, 2] = w * (labels0[:, 2] - labels0[:, 4] / 2)
+            labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
+            labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
+            labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
         else:
             raise ValueError('invalid label path: {}'.format(label_path))
         if 'MOT17' in img_path:
