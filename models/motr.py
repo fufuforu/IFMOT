@@ -554,8 +554,8 @@ class MOTR(nn.Module):
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         track_instances.output_embedding = frame_res['hs'][0]
         if self.training:
-            print((track_instances.scores>0.5).sum())
-            raise RuntimeError("over")
+            # print((track_instances.scores>0.5).sum())
+            # raise RuntimeError("over")
             # the track id will be assigned by the mather.
             frame_res['track_instances'] = track_instances
             track_instances = self.criterion.match_for_single_frame(frame_res)

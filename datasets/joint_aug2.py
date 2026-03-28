@@ -44,7 +44,22 @@ class DetMOTDetection:
         #         return True
         #     if not name.isdigit():
         #         return False  # 避免 int() 报错
+        # def is_keep(p):
+        #     name = osp.basename(p).split('.')[0]
+        #     # import pdb;pdb.set_trace()
+        #     if "crowdhuman" in p.lower():
+        #         return True
+        #     if not name.isdigit():
+        #         return False  # 避免 int() 报错
 
+        #     # 3. 判断 frame_interval
+        #     idx = int(name)
+        #     return (idx - 1) % self.frame_interval == 0
+        # if self.frame_interval is not None:
+        #     self.img_files = [
+        #             p for p in self.img_files 
+        #             if is_keep(p)
+        #         ]
         #     # 3. 判断 frame_interval
         #     idx = int(name)
         #     return (idx - 1) % self.frame_interval == 0
@@ -113,34 +128,37 @@ class DetMOTDetection:
     def _pre_single_frame(self, idx: int):
         img_path = self.img_files[idx]
         label_path = self.label_files[idx]
+        # import pdb;pdb.set_trace()
         if 'crowdhuman' in img_path:
             
-            img_path = img_path.replace('val/','').replace('crowdhuman/images','crowdhuman/Images')
-            label_path = label_path.replace('val/','').replace('crowdhuman/','crowdhuman_')
-        elif 'Crowdhuman' in img_path:
-            img_path = img_path.replace('val/','').replace('Crowdhuman/images','crowdhuman/Images')
-            label_path = label_path.replace('val/','').replace('Crowdhuman/','crowdhuman_')
+            img_path = img_path.replace('val/','') #.replace('crowdhuman/images','crowdhuman/Images')
+            label_path = label_path.replace('val/','') .replace('crowdhuman_','crowdhuman/')
+        # elif 'Crowdhuman' in img_path:
+        #     img_path = img_path.replace('val/','').replace('Crowdhuman/images','crowdhuman/Images')
+        #     label_path = label_path.replace('val/','').replace('Crowdhuman/','crowdhuman_')
         else:
-            img_path = img_path.replace('images/','')
-            label_path = label_path.replace('MOT17/','MOT17_')
+            # img_path = img_path.replace('images/','')
+            label_path = label_path.replace('MOT17_','MOT17/')
         img = Image.open(img_path)
         targets = {}
         w, h = img._size
         assert w > 0 and h > 0, "invalid image {} with shape {} {}".format(img_path, w, h)
         if osp.isfile(label_path):
             labels0 = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 6)
-
+            
             # normalized cewh to pixel xyxy format
             labels = labels0.copy()
             labels[:, 2] = w * (labels0[:, 2] - labels0[:, 4] / 2)
             labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
             labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
             labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
+            # import pdb;pdb.set_trace()
         else:
             raise ValueError('invalid label path: {}'.format(label_path))
         if 'MOT17' in img_path:
             video_name = '/'.join(label_path.split('/')[:-1])
-            obj_idx_offset = self.video_dict[video_name] * 1000000  # 1000000 unique ids is enough for a video.
+            obj_idx_offset = 1000000
+            # obj_idx_offset = self.video_dict[video_name] * 1000000  # 1000000 unique ids is enough for a video.
         else:
             obj_idx_offset = 1000000  #crowdhuman
         if 'crowdhuman' in img_path:
