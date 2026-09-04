@@ -50,12 +50,12 @@ def gen_labels_crowd(data_root, label_root, ann_root):
 
 
 if __name__ == '__main__':
-    data_val = '/space/mawb/MOTR/data/Dataset/mot/crowdhuman/Images'
-    label_val = '/space/mawb/MOTR/data/Dataset/mot/crowdhuman_labels_with_ids/val'
-    ann_val = '/space/mawb/MOTR/data/Dataset/mot/crowdhuman/annotation_val.odgt'
-    data_train = '/space/mawb/MOTR/data/Dataset/mot/crowdhuman/Images'
-    label_train = '/space/mawb/MOTR/data/Dataset/mot/crowdhuman_labels_with_ids/train'
-    ann_train = '/space/mawb/MOTR/data/Dataset/mot/crowdhuman/annotation_train.odgt'
+    data_val = '/space/mawb/MOTR/data/Datasets/mot/crowdhuman/Images'
+    label_val = '/space/mawb/MOTR/data/Datasets/mot/crowdhuman_labels_with_ids/val'
+    ann_val = '/space/mawb/MOTR/data/Datasets/mot/crowdhuman/annotation_val.odgt'
+    data_train = '/space/mawb/MOTR/data/Datasets/mot/crowdhuman/Images'
+    label_train = '/space/mawb/MOTR/data/Datasets/mot/crowdhuman_labels_with_ids/train'
+    ann_train = '/space/mawb/MOTR/data/Datasets/mot/crowdhuman/annotation_train.odgt'
     gen_labels_crowd(data_train, label_train, ann_train)
     gen_labels_crowd(data_val, label_val, ann_val)
 

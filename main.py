@@ -220,7 +220,7 @@ def main(args):
 
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True)
-    if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
+    if args.dataset_file in ['e2e_mot', 'e2e_dance_aug2', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
         collate_fn = utils.mot_collate_fn
     else:
         collate_fn = utils.collate_fn
@@ -323,7 +323,7 @@ def main(args):
     start_time = time.time()
 
     train_func = train_one_epoch
-    if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
+    if args.dataset_file in ['e2e_mot', 'e2e_dance_aug2', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
         train_func = train_one_epoch_mot
         dataset_train.set_epoch(args.start_epoch)
         dataset_val.set_epoch(args.start_epoch)
@@ -347,7 +347,7 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)  
         
-        if args.dataset_file not in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
+        if args.dataset_file not in ['e2e_mot', 'e2e_dance_aug2', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
@@ -371,7 +371,7 @@ def main(args):
                         for name in filenames:
                             torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                        output_dir / "eval" / name)
-        if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
+        if args.dataset_file in ['e2e_mot', 'e2e_dance_aug2', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint','e2e_joint_aug1','e2e_joint_aug2','e2e_mot17_aug1_aug2']:
             dataset_train.step_epoch()
             dataset_val.step_epoch()
     total_time = time.time() - start_time

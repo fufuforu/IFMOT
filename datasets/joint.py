@@ -142,14 +142,14 @@ class DetMOTDetection:
         label_path = self.label_files[idx]
         if 'crowdhuman' in img_path:
             
-            img_path = img_path.replace('val/','') #.replace('crowdhuman/images','crowdhuman/Images')
-            label_path = label_path.replace('val/','') .replace('crowdhuman_','crowdhuman/')
-        # elif 'Crowdhuman' in img_path:
-        #     img_path = img_path.replace('val/','').replace('Crowdhuman/images','crowdhuman/Images')
-        #     label_path = label_path.replace('val/','').replace('Crowdhuman/','crowdhuman_')
+            img_path = img_path.replace('val/','').replace('crowdhuman/images','crowdhuman/Images')
+            label_path = label_path.replace('val/','').replace('crowdhuman/','crowdhuman_')
+        elif 'CrowdHuman' in img_path:
+            img_path = img_path.replace('val/','').replace('CrowdHuman/images','crowdhuman/Images')
+            label_path = label_path.replace('val/','').replace('CrowdHuman/','crowdhuman_')
         else:
-            # img_path = img_path.replace('images/','')
-            label_path = label_path.replace('MOT17_','MOT17/')
+            img_path = img_path.replace('images/','')
+            label_path = label_path.replace('MOT17/','MOT17_')
         img = Image.open(img_path)
         targets = {}
         w, h = img._size

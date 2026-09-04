@@ -379,6 +379,7 @@ class ClipMatcher(SetCriterion):
             self.losses_dict.update(
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
 
+        # 计算 Auxiliary Outputs Loss
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 unmatched_outputs_layer = {
@@ -405,10 +406,10 @@ class ClipMatcher(SetCriterion):
     def match_for_single_frame_not_use_id(self, outputs: dict, box_features, last_box_features):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
-        gt_instances_i = self.gt_instances[self._current_frame_idx]  # gt instances of i-th image.
+        gt_instances_i = self.gt_instances[self._current_frame_idx]
         track_instances: Instances = outputs_without_aux['track_instances']
-        pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
-        pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
+        pred_logits_i = track_instances.pred_logits
+        pred_boxes_i = track_instances.pred_boxes
 
         device = pred_logits_i.device
         num_tracks = track_instances.pred_boxes.shape[0]
@@ -423,27 +424,49 @@ class ClipMatcher(SetCriterion):
         track_instances.matched_gt_idxes[:] = -1
         full_track_idxes = torch.arange(num_tracks, dtype=torch.long, device=device)
 
-        # --------------------------------------------------------------------------------
-        # Step 1: 提取需要匹配的活跃 Track Queries 和 活跃 GTs
-        # --------------------------------------------------------------------------------
+        # 提取需要匹配的活跃 Track Queries, 活跃 GTs 和 纯 Detect Queries
         all_track_query_mask = track_instances.obj_idxes >= 0
         all_track_query_idxes = all_track_query_mask.nonzero().flatten()
 
         all_gt_mask = gt_instances_i.obj_ids >= 0
         all_gt_idxes = all_gt_mask.nonzero().flatten()
+        
+        unmatched_detect_idxes = full_track_idxes[track_instances.obj_idxes == -1]
+
+        # 维护全局匹配 Mask，用于串联三个 Step
+        track_matched_mask = torch.zeros(num_tracks, dtype=torch.bool, device=device)
+        gt_matched_mask = torch.zeros(num_gts, dtype=torch.bool, device=device)
 
         # --------------------------------------------------------------------------------
-        # Step 2: Method B+ (Gated Joint Matching) 匹配已存在的轨迹
+        # Step 1: Confident Tracking (利用双门控融合 Cost 匹配高置信度 Track)
         # --------------------------------------------------------------------------------
+        matched_indices_step1_list = []
         if len(all_track_query_idxes) > 0 and len(all_gt_idxes) > 0:
-            track_boxes = box_ops.box_cxcywh_to_xyxy(track_instances.pred_boxes[all_track_query_idxes])
-            gt_boxes = box_ops.box_cxcywh_to_xyxy(gt_instances_i.boxes[all_gt_idxes])
+            out_bbox = track_instances.pred_boxes[all_track_query_idxes]
+            tgt_bbox = gt_instances_i.boxes[all_gt_idxes]
             
-            # 1. 计算空间 Cost
-            giou_matrix = generalized_box_iou(track_boxes, gt_boxes)
-            cost_spatial = 1.0 - giou_matrix
+            # 计算 Spatial Cost (Focal Cls + L1 + GIoU)
+            out_prob = track_instances.pred_logits[all_track_query_idxes].sigmoid()
+            tgt_ids = gt_instances_i.labels[all_gt_idxes]
             
-            # 2. 计算表观 Cost
+            alpha_f = 0.25
+            gamma_f = 2.0
+            neg_cost_class = (1 - alpha_f) * (out_prob ** gamma_f) * (-(1 - out_prob + 1e-8).log())
+            pos_cost_class = alpha_f * ((1 - out_prob) ** gamma_f) * (-(out_prob + 1e-8).log())
+            cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+
+            cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
+            
+            track_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(out_bbox)
+            gt_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(tgt_bbox)
+            giou_matrix = generalized_box_iou(track_boxes_xyxy, gt_boxes_xyxy)
+            cost_giou = -giou_matrix
+            
+            cost_spatial = self.matcher.cost_bbox * cost_bbox + \
+                           self.matcher.cost_class * cost_class + \
+                           self.matcher.cost_giou * cost_giou
+            
+            # 计算 Appearance Cost
             track_features = track_instances.box_features[all_track_query_idxes]
             current_features = box_features[all_gt_idxes]
             track_features_norm = F.normalize(track_features, p=2, dim=1)
@@ -451,131 +474,182 @@ class ClipMatcher(SetCriterion):
             cos_sim = torch.mm(track_features_norm, current_features_norm.t())
             cost_app = 1.0 - cos_sim
             
-            # 3. 动态融合权重
-            weight_app = torch.where(giou_matrix > 0, 0.5, 1.5)
-            cost_matrix = cost_spatial + weight_app * cost_app 
+            # 动态融合权重 (基于 Top-2 相似度差值)
+            num_candidates = cos_sim.shape[1]
+            if num_candidates > 1:
+                top2_sim, _ = torch.topk(cos_sim, k=2, dim=1)
+                alpha_weight = top2_sim[:, 0] - top2_sim[:, 1]
+            else:
+                alpha_weight = torch.full((cos_sim.shape[0],), 0.5, device=device)
             
-            # 4. 严格 Gating (消除剧烈运动或遮挡带来的脏匹配)
-            invalid_mask = (giou_matrix < -0.1) & (cos_sim < 0.5)
-            invalid_mask_hard = cos_sim < 0.2
-            cost_matrix[invalid_mask | invalid_mask_hard] = 1e6
+            alpha_weight = torch.clamp(alpha_weight, min=0.0, max=1.0).unsqueeze(1)
+            cost_matrix = (1.0 - alpha_weight) * cost_spatial + alpha_weight * cost_app 
             
-            # 5. 匈牙利算法求解
+            # 严格双门控 Gating
+            if num_candidates < 5:  
+                invalid_mask_spatial = giou_matrix < -0.1
+                invalid_mask_app = cos_sim < 0.2
+
+            else:
+                mu_app = cos_sim.mean(dim=1, keepdim=True)
+                std_app = cos_sim.std(dim=1, keepdim=True) if cos_sim.shape[1] > 1 else torch.zeros_like(mu_app)
+                
+                mu_giou = giou_matrix.mean(dim=1, keepdim=True)
+                std_giou = giou_matrix.std(dim=1, keepdim=True) if giou_matrix.shape[1] > 1 else torch.zeros_like(mu_giou)
+
+                invalid_mask_spatial = giou_matrix < (mu_giou - std_giou)
+                invalid_mask_app = cos_sim < (mu_app - std_app)
+
+
+            invalid_mask = invalid_mask_spatial | invalid_mask_app
+            spatial_bypass_mask = giou_matrix > 0.5 
+            final_invalid_mask = (invalid_mask ) & (~spatial_bypass_mask)
+            
+            cost_matrix[final_invalid_mask] = 1e6
+            
             C = cost_matrix.cpu().detach().numpy()
             row_ind, col_ind = linear_sum_assignment(C)
             
-            # 6. 过滤无效匹配
-            valid_matches = []
             for r, c in zip(row_ind, col_ind):
                 if C[r, c] < 1e5:  
-                    valid_matches.append([all_track_query_idxes[r], all_gt_idxes[c]])
+                    matched_indices_step1_list.append([all_track_query_idxes[r], all_gt_idxes[c]])
+                    track_matched_mask[all_track_query_idxes[r]] = True
+                    gt_matched_mask[all_gt_idxes[c]] = True
+
+        matched_indices_step1 = torch.tensor(matched_indices_step1_list, dtype=torch.int64, device=device) if len(matched_indices_step1_list) > 0 else torch.empty((0, 2), dtype=torch.int64, device=device)
+
+        # --------------------------------------------------------------------------------
+        # Step 2: Spatial Recovery (也就是你需要的中间那一步！给未匹配 Track 一次纯空间降级匹配机会)
+        # --------------------------------------------------------------------------------
+        unmatched_track_idxes_s2 = all_track_query_idxes[~track_matched_mask[all_track_query_idxes]]
+        untracked_gt_idxes_s2 = all_gt_idxes[~gt_matched_mask[all_gt_idxes]]
+        
+        matched_indices_step2_list = []
+        if len(unmatched_track_idxes_s2) > 0 and len(untracked_gt_idxes_s2) > 0:
+            out_bbox_s2 = track_instances.pred_boxes[unmatched_track_idxes_s2]
+            tgt_bbox_s2 = gt_instances_i.boxes[untracked_gt_idxes_s2]
             
-            if len(valid_matches) > 0:
-                prev_matched_indices = torch.tensor(valid_matches, dtype=torch.int64, device=device)
-            else:
-                prev_matched_indices = torch.empty((0, 2), dtype=torch.int64, device=device)
+            out_prob_s2 = track_instances.pred_logits[unmatched_track_idxes_s2].sigmoid()
+            tgt_ids_s2 = gt_instances_i.labels[untracked_gt_idxes_s2]
+            
+            # 同样计算分类和回归的综合 Cost，但不加入外观 Cost
+            alpha_f = 0.25
+            gamma_f = 2.0
+            neg_cost_class_s2 = (1 - alpha_f) * (out_prob_s2 ** gamma_f) * (-(1 - out_prob_s2 + 1e-8).log())
+            pos_cost_class_s2 = alpha_f * ((1 - out_prob_s2) ** gamma_f) * (-(out_prob_s2 + 1e-8).log())
+            cost_class_s2 = pos_cost_class_s2[:, tgt_ids_s2] - neg_cost_class_s2[:, tgt_ids_s2]
+            
+            cost_bbox_s2 = torch.cdist(out_bbox_s2, tgt_bbox_s2, p=1)
+            
+            track_boxes_xyxy_s2 = box_ops.box_cxcywh_to_xyxy(out_bbox_s2)
+            gt_boxes_xyxy_s2 = box_ops.box_cxcywh_to_xyxy(tgt_bbox_s2)
+            giou_matrix_s2 = generalized_box_iou(track_boxes_xyxy_s2, gt_boxes_xyxy_s2)
+            cost_giou_s2 = -giou_matrix_s2
+            
+            cost_matrix_s2 = self.matcher.cost_bbox * cost_bbox_s2 + \
+                             self.matcher.cost_class * cost_class_s2 + \
+                             self.matcher.cost_giou * cost_giou_s2
+
+            # Gating: 严格过滤低空间重叠的候选框 (保留重叠度 GIoU > -0.2 的目标)
+            invalid_mask_s2 = giou_matrix_s2 < -0.2 
+            cost_matrix_s2[invalid_mask_s2] = 1e6
+            
+            C_s2 = cost_matrix_s2.cpu().detach().numpy()
+            row_ind_s2, col_ind_s2 = linear_sum_assignment(C_s2)
+            
+            for r, c in zip(row_ind_s2, col_ind_s2):
+                if C_s2[r, c] < 1e5:
+                    matched_indices_step2_list.append([unmatched_track_idxes_s2[r], untracked_gt_idxes_s2[c]])
+                    track_matched_mask[unmatched_track_idxes_s2[r]] = True
+                    gt_matched_mask[untracked_gt_idxes_s2[c]] = True
+                    
+        matched_indices_step2 = torch.tensor(matched_indices_step2_list, dtype=torch.int64, device=device) if len(matched_indices_step2_list) > 0 else torch.empty((0, 2), dtype=torch.int64, device=device)
+
+        # --------------------------------------------------------------------------------
+        # Step 3: Newborn Initialization (使用空闲的 Detect Queries 去捡漏剩余的新生 GT)
+        # --------------------------------------------------------------------------------
+        untracked_gt_idxes_s3 = all_gt_idxes[~gt_matched_mask[all_gt_idxes]]
+        
+        matched_indices_step3_list = []
+        if len(unmatched_detect_idxes) > 0 and len(untracked_gt_idxes_s3) > 0:
+            unmatched_outputs = {
+                'pred_logits': track_instances.pred_logits[unmatched_detect_idxes].unsqueeze(0),
+                'pred_boxes': track_instances.pred_boxes[unmatched_detect_idxes].unsqueeze(0),
+            }
+            untracked_targets = {
+                'labels': gt_instances_i.labels[untracked_gt_idxes_s3],
+                'boxes': gt_instances_i.boxes[untracked_gt_idxes_s3],
+            }
+            
+            match_res = self.matcher(unmatched_outputs, [untracked_targets])
+            new_track_indices = match_res[0] 
+            
+            src_idx = new_track_indices[0]
+            tgt_idx = new_track_indices[1]
+            matched_indices_step3 = torch.stack([unmatched_detect_idxes[src_idx], untracked_gt_idxes_s3[tgt_idx]], dim=1).to(device)
+            # 更新 Track Mask (对于 detect slots 的遮挡判定没有意义，但保持逻辑完整)
+            track_matched_mask[unmatched_detect_idxes[src_idx]] = True
         else:
-            prev_matched_indices = torch.empty((0, 2), dtype=torch.int64, device=device)
+            matched_indices_step3 = torch.empty((0, 2), dtype=torch.int64, device=device)
 
         # --------------------------------------------------------------------------------
-        # Step 3: 找出未匹配上的 Slots (包括 Disappear Track 和 Empty Slots) 以及 新出现的 GT
+        # 汇总分配结果与轨迹生命周期管理
         # --------------------------------------------------------------------------------
-        unmatched_detect_idxes = full_track_idxes[track_instances.obj_idxes == -1] # 一直为空的 slot
-        
-        # 找出之前是活跃的，但这一帧没匹配上的 (Disappear tracks)
-        matched_mask = torch.zeros((num_tracks, num_gts), dtype=torch.bool, device=device)
-        if len(prev_matched_indices) > 0:
-            matched_mask[prev_matched_indices[:, 0], prev_matched_indices[:, 1]] = True
-            track_instances.matched_gt_idxes[prev_matched_indices[:, 0]] = prev_matched_indices[:, 1]
-            
-        unmatched_track_mask = (matched_mask.sum(dim=-1) == 0) & (track_instances.obj_idxes >= 0) 
-        unmatched_track_idxes = unmatched_track_mask.nonzero().flatten() # 消失的目标
-        
-        # 用于与新 GT 匹配的所有空闲 slots
-        unmatched_idxes = torch.cat((unmatched_detect_idxes, unmatched_track_idxes), dim=0)
+        matched_indices = torch.cat([matched_indices_step1, matched_indices_step2, matched_indices_step3], dim=0)
+        # import pdb;pdb.set_trace()
+        # 获取在经历了 Step1 和 Step2 之后，依然没有任何匹配的 Track
+        unmatched_track_idxes_final = all_track_query_idxes[~track_matched_mask[all_track_query_idxes]]
 
-        # 找出未被分配的 GT (New tracks)
-        tgt_indexes = track_instances.matched_gt_idxes
-        tgt_indexes = tgt_indexes[tgt_indexes != -1]
-        tgt_state = torch.zeros(len(gt_instances_i), device=device)
-        tgt_state[tgt_indexes] = 1
-        untracked_tgt_indexes = torch.arange(len(gt_instances_i), device=device)[tgt_state == 0]
-
-        # --------------------------------------------------------------------------------
-        # Step 4: 新目标的生成 (Empty slots vs New GTs) 使用标准 DETR Matcher
-        # --------------------------------------------------------------------------------
-        unmatched_outputs = {
-            'pred_logits': track_instances.pred_logits[unmatched_idxes].unsqueeze(0),
-            'pred_boxes': track_instances.pred_boxes[unmatched_idxes].unsqueeze(0),
-        }
-        untracked_targets = {
-            'labels': gt_instances_i.labels[untracked_tgt_indexes],
-            'boxes': gt_instances_i.boxes[untracked_tgt_indexes],
-        }
-        
-        # 使用基础 matcher
-        match_res = self.matcher(unmatched_outputs, [untracked_targets])
-        # 修改点：适配你的 matcher 返回值 (new_track_indices, min_index, _, _)
-        new_track_indices = match_res[0] 
-        
-        src_idx = new_track_indices[0]
-        tgt_idx = new_track_indices[1]
-        new_matched_indices = torch.stack([unmatched_idxes[src_idx], untracked_tgt_indexes[tgt_idx]], dim=1).to(device)
-
-        # 获取最终没有任何匹配对象的活跃 Track (彻底无归属)
-        matches_mask = torch.isin(unmatched_track_idxes, new_matched_indices[:, 0])
-        unmatched_track_idxes_final = unmatched_track_idxes[~matches_mask]
-
-        # --------------------------------------------------------------------------------
-        # Step 5: 轨迹生命周期管理 (Lifecycle Management)
-        # --------------------------------------------------------------------------------
-        matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
-
-        # 1. 匹配上的轨迹：丢失时间清零
         if len(matched_indices) > 0:
+            # 匹配上的轨迹 (包括历史延续和新检测的)，丢失时间清零
             track_instances.disappear_time[matched_indices[:, 0]] = 0
 
-        # 2. 未匹配上的轨迹：丢失时间累加
         if len(unmatched_track_idxes_final) > 0:
+            # 彻底未匹配的轨迹，丢失时间累加
             track_instances.disappear_time[unmatched_track_idxes_final] += 1
 
-        # 3. 区分容忍期与真正消失 (过滤出应该被 Ignore 的 Slots)
-        miss_tolerance = 3  # MOT17 建议设为 3-5 帧
+        miss_tolerance = 3
         if len(unmatched_track_idxes_final) > 0:
             mask_ignore = track_instances.disappear_time[unmatched_track_idxes_final] <= miss_tolerance
             true_ignore_idxes = unmatched_track_idxes_final[mask_ignore]
         else:
             true_ignore_idxes = torch.empty((0,), dtype=torch.long, device=device)
 
-        num_disappear_track = len(unmatched_track_idxes_final) - len(true_ignore_idxes) # 真正被作为背景的消失数量
+        num_disappear_track = len(unmatched_track_idxes_final) - len(true_ignore_idxes) 
 
         # --------------------------------------------------------------------------------
-        # Step 6: 状态更新与 EMA 特征平滑
+        # 状态感知特征更新 (State-Aware Feature Update, SAFU)
         # --------------------------------------------------------------------------------
         if len(matched_indices) > 0:
             track_idx = matched_indices[:, 0]
             gt_idx = matched_indices[:, 1]
             
-            # 更新匹配关系和 Obj ID
             track_instances.matched_gt_idxes[track_idx] = gt_idx
             track_instances.obj_idxes[track_idx] = gt_instances_i.obj_ids[gt_idx].long()
             
-            # === EMA 特征平滑更新逻辑 ===
-            alpha = 0.9  # 历史特征保留率
+            alpha_ema = 0.8
             current_feat = box_features[gt_idx]
             old_feat = track_instances.box_features[track_idx]
             
-            # 如果是刚初始化的 slot (全0)，不使用 EMA，直接赋当前特征
-            is_initialized = (old_feat.abs().sum(dim=-1) > 0).unsqueeze(-1)
-            ema_feat = alpha * old_feat + (1.0 - alpha) * current_feat
-            updated_feat = torch.where(is_initialized, ema_feat, current_feat)
+            old_feat_norm = F.normalize(old_feat, p=2, dim=1)
+            current_feat_norm = F.normalize(current_feat, p=2, dim=1)
+            sim = (old_feat_norm * current_feat_norm).sum(dim=-1, keepdim=True)
             
-            # 融合后重新 L2 归一化
+            is_similar = sim > 0.6  
+            is_initialized = (old_feat.abs().sum(dim=-1) > 0).unsqueeze(-1)
+            ema_feat = alpha_ema * old_feat + (1.0 - alpha_ema) * current_feat
+            
+            updated_feat = torch.where(
+                ~is_initialized, 
+                current_feat, 
+                torch.where(is_similar, ema_feat, old_feat)
+            )
+            
             updated_feat = F.normalize(updated_feat, p=2, dim=1)
             track_instances.box_features[track_idx] = updated_feat.detach()
 
         # --------------------------------------------------------------------------------
-        # Step 7: 计算 IoU 与 Losses
+        # 计算 IoU 与 Losses
         # --------------------------------------------------------------------------------
         active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
         active_track_boxes = track_instances.pred_boxes[active_idxes]
@@ -585,7 +659,6 @@ class ClipMatcher(SetCriterion):
             gt_boxes = box_ops.box_cxcywh_to_xyxy(gt_boxes)
             track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
 
-        # 汇总 Loss
         self.num_samples += len(gt_instances_i) + num_disappear_track
         self.sample_device = device
         
@@ -595,28 +668,25 @@ class ClipMatcher(SetCriterion):
                                            gt_instances=[gt_instances_i],
                                            indices=[(matched_indices[:, 0], matched_indices[:, 1])],
                                            num_boxes=1,
-                                           unmatched_track_idxes=true_ignore_idxes) # <- 应用真实的 ignore 列表
+                                           unmatched_track_idxes=true_ignore_idxes) 
             self.losses_dict.update(
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
                 
-        # 计算特征间的对比学习 Loss
         new_feature_loss = self.get_features_loss(box_features, last_box_features)
         self.losses_dict.update(
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_feature_loss.items()})
 
-        # 计算 Auxiliary Outputs Loss
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                matched_indices_layer = matched_indices
                 for loss in self.losses:
                     if loss == 'masks':
                         continue
                     l_dict = self.get_loss(loss,
                                            aux_outputs,
                                            gt_instances=[gt_instances_i],
-                                           indices=[(matched_indices_layer[:, 0], matched_indices_layer[:, 1])],
+                                           indices=[(matched_indices[:, 0], matched_indices[:, 1])],
                                            num_boxes=1, 
-                                           unmatched_track_idxes=true_ignore_idxes) # <- 辅助层也要同步 ignore
+                                           unmatched_track_idxes=true_ignore_idxes) 
                     self.losses_dict.update(
                         {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in l_dict.items()})
                         
@@ -1246,4 +1316,4 @@ def build(args):
     return model, criterion, postprocessors
 #完整版本：第一次匹配之后根据最小值和特征筛选，第二次正常匹配（给匹配上的detect query分配id）。不计算未匹配track query的分类loss。
 #joint版本，用id做监督
-# 2026 3 25 替换之前交集筛选的策略，以及特征更新机制 
+# 2026 4 15 新版本v15 ,v12基础上，对spatial的cost和gate修改，ema加入判断机制,三步走匹配

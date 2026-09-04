@@ -379,26 +379,48 @@ class ClipMatcher(SetCriterion):
             self.losses_dict.update(
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
 
+        # 计算 Auxiliary Outputs Loss
         if 'aux_outputs' in outputs:
+            # 拿到当前帧所有的 GT
+            full_tgt_idxes = torch.arange(len(gt_instances_i), device=pred_logits_i.device)
+            all_gt_targets = {
+                'labels': gt_instances_i.labels,
+                'boxes': gt_instances_i.boxes,
+            }
+            
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                # ==== COMOT 核心思想：在辅助层让 Detect Query 和【所有 GT】进行匹配 ====
                 unmatched_outputs_layer = {
                     'pred_logits': aux_outputs['pred_logits'][0, unmatched_track_idxes].unsqueeze(0),
                     'pred_boxes': aux_outputs['pred_boxes'][0, unmatched_track_idxes].unsqueeze(0),
                 }
-                new_matched_indices_layer = match_for_single_decoder_layer(unmatched_outputs_layer, self.matcher)
+                
+                # 让 Detect Query 与所有 GT 匹配（制造重叠匹配的 Loss 信号，强行训练检测能力）
+                match_res_layer = self.matcher(unmatched_outputs_layer, [all_gt_targets])
+                new_track_indices_layer = match_res_layer[0]
+                
+                src_idx_layer = new_track_indices_layer[0]
+                tgt_idx_layer = new_track_indices_layer[1]
+                
+                new_matched_indices_layer = torch.stack([
+                    unmatched_track_idxes[src_idx_layer], 
+                    full_tgt_idxes[tgt_idx_layer]
+                ], dim=1).to(pred_logits_i.device)
+
+                # 合并：辅助层的 Detect 匹配 + 原有的 Track 匹配 (允许同一个 GT 被指派两次)
                 matched_indices_layer = torch.cat([new_matched_indices_layer, prev_matched_indices], dim=0)
+                # ====================================================================
+
                 for loss in self.losses:
                     if loss == 'masks':
-                        # Intermediate masks losses are too costly to compute, we ignore them.
                         continue
                     l_dict = self.get_loss(loss,
                                            aux_outputs,
                                            gt_instances=[gt_instances_i],
                                            indices=[(matched_indices_layer[:, 0], matched_indices_layer[:, 1])],
-                                           num_boxes=1, )
+                                           num_boxes=1)
                     self.losses_dict.update(
-                        {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                         l_dict.items()})
+                        {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in l_dict.items()})
         self._step()
         return track_instances
 
@@ -452,13 +474,34 @@ class ClipMatcher(SetCriterion):
             cost_app = 1.0 - cos_sim
             
             # 3. 动态融合权重
-            weight_app = torch.where(giou_matrix > 0, 0.5, 1.5)
+            # weight_app = torch.where(giou_matrix > 0, 0.5, 1.5)
+            weight_app = torch.exp(-giou_matrix)
             cost_matrix = cost_spatial + weight_app * cost_app 
             
-            # 4. 严格 Gating (消除剧烈运动或遮挡带来的脏匹配)
-            invalid_mask = (giou_matrix < -0.1) & (cos_sim < 0.5)
-            invalid_mask_hard = cos_sim < 0.2
-            cost_matrix[invalid_mask | invalid_mask_hard] = 1e6
+            num_candidates = cos_sim.shape[1]
+            if num_candidates < 5:  
+                # 人太少，关闭统计门控，退回宽松的绝对阈值
+                invalid_mask = (giou_matrix < -0.1) & (cos_sim < 0.2)
+                invalid_mask_hard = cos_sim < -1.0 # 关闭一票否决
+            else:
+                # 4. 严格 Gating (消除剧烈运动或遮挡带来的脏匹配)
+                # 计算均值和标准差 (自适应当前的相似度聚拢现象)
+                mu = cos_sim.mean(dim=1, keepdim=True)
+                std = cos_sim.std(dim=1, keepdim=True) if cos_sim.shape[1] > 1 else torch.zeros_like(mu)
+
+                # 动态统计阈值 (Z-score 检验)
+                dynamic_soft_thresh = mu + std
+                dynamic_hard_thresh = mu
+
+                # 执行 Gating
+                invalid_mask = (giou_matrix < -0.1) & (cos_sim < dynamic_soft_thresh)
+                invalid_mask_hard = cos_sim < dynamic_hard_thresh
+
+            spatial_bypass_mask = giou_matrix > 0.5 
+            final_invalid_mask = (invalid_mask | invalid_mask_hard) & (~spatial_bypass_mask)
+            cost_matrix[final_invalid_mask] = 1e6
+            # cost_matrix[invalid_mask | invalid_mask_hard] = 1e6
+            # import pdb;pdb.set_trace()
             
             # 5. 匈牙利算法求解
             C = cost_matrix.cpu().detach().numpy()
@@ -605,9 +648,38 @@ class ClipMatcher(SetCriterion):
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_feature_loss.items()})
 
         # 计算 Auxiliary Outputs Loss
+        # 计算 Auxiliary Outputs Loss
         if 'aux_outputs' in outputs:
+            # 拿到当前帧所有的 GT
+            full_tgt_idxes = torch.arange(len(gt_instances_i), device=device)
+            all_gt_targets = {
+                'labels': gt_instances_i.labels,
+                'boxes': gt_instances_i.boxes,
+            }
+            
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                matched_indices_layer = matched_indices
+                # ==== COMOT 核心思想：在辅助层让 Detect Query 和【所有 GT】进行匹配 ====
+                unmatched_outputs_layer = {
+                    'pred_logits': aux_outputs['pred_logits'][0, unmatched_idxes].unsqueeze(0),
+                    'pred_boxes': aux_outputs['pred_boxes'][0, unmatched_idxes].unsqueeze(0),
+                }
+                
+                # 让 Detect Query 与所有 GT 匹配（制造重叠匹配的 Loss 信号，强行训练检测能力）
+                match_res_layer = self.matcher(unmatched_outputs_layer, [all_gt_targets])
+                new_track_indices_layer = match_res_layer[0]
+                
+                src_idx_layer = new_track_indices_layer[0]
+                tgt_idx_layer = new_track_indices_layer[1]
+                
+                new_matched_indices_layer = torch.stack([
+                    unmatched_idxes[src_idx_layer], 
+                    full_tgt_idxes[tgt_idx_layer]
+                ], dim=1).to(device)
+
+                # 合并：辅助层的 Detect 匹配 + 原有的 Track 匹配 (允许同一个 GT 被指派两次)
+                matched_indices_layer = torch.cat([new_matched_indices_layer, prev_matched_indices], dim=0)
+                # ====================================================================
+
                 for loss in self.losses:
                     if loss == 'masks':
                         continue
@@ -616,7 +688,7 @@ class ClipMatcher(SetCriterion):
                                            gt_instances=[gt_instances_i],
                                            indices=[(matched_indices_layer[:, 0], matched_indices_layer[:, 1])],
                                            num_boxes=1, 
-                                           unmatched_track_idxes=true_ignore_idxes) # <- 辅助层也要同步 ignore
+                                           unmatched_track_idxes=true_ignore_idxes)
                     self.losses_dict.update(
                         {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in l_dict.items()})
                         
@@ -1246,4 +1318,4 @@ def build(args):
     return model, criterion, postprocessors
 #完整版本：第一次匹配之后根据最小值和特征筛选，第二次正常匹配（给匹配上的detect query分配id）。不计算未匹配track query的分类loss。
 #joint版本，用id做监督
-# 2026 3 25 替换之前交集筛选的策略，以及特征更新机制 
+# 2026 4 1 新版本v13尝试comot那种策略

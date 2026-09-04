@@ -131,14 +131,14 @@ class DetMOTDetection:
         # import pdb;pdb.set_trace()
         if 'crowdhuman' in img_path:
             
-            img_path = img_path.replace('val/','') #.replace('crowdhuman/images','crowdhuman/Images')
-            label_path = label_path.replace('val/','') .replace('crowdhuman_','crowdhuman/')
-        # elif 'Crowdhuman' in img_path:
-        #     img_path = img_path.replace('val/','').replace('Crowdhuman/images','crowdhuman/Images')
-        #     label_path = label_path.replace('val/','').replace('Crowdhuman/','crowdhuman_')
+            img_path = img_path.replace('val/','').replace('crowdhuman/images','crowdhuman/Images')
+            label_path = label_path.replace('val/','').replace('crowdhuman/','crowdhuman_')
+        elif 'CrowdHuman' in img_path:
+            img_path = img_path.replace('val/','').replace('CrowdHuman/images','crowdhuman/Images')
+            label_path = label_path.replace('val/','').replace('CrowdHuman/','crowdhuman_')
         else:
-            # img_path = img_path.replace('images/','')
-            label_path = label_path.replace('MOT17_','MOT17/')
+            img_path = img_path.replace('images/','')
+            label_path = label_path.replace('MOT17/','MOT17_')
         img = Image.open(img_path)
         targets = {}
         w, h = img._size
@@ -211,15 +211,17 @@ class DetMOTDetection:
         return images, targets
 
     def transform_for_shuffle(self, images, targets):
-        for target in targets:
+        for i, target in enumerate(targets): # 注意这里加了 enumerate(targets)
                 obj_ids = target['obj_ids']
                 mask = obj_ids != -1
                 valid_indices = torch.where(mask)[0]
                 valid_values = obj_ids[valid_indices]
-                perm = torch.randperm(valid_values.size(0))
-                shuffled_values = perm
+                
+                # 加入帧偏移 i * 10000，绝对杜绝跨帧撞号
+                perm = torch.randperm(valid_values.size(0)) + i * 10000
+                
                 shuffled_obj_ids = obj_ids.clone().long()
-                shuffled_obj_ids[valid_indices] = shuffled_values
+                shuffled_obj_ids[valid_indices] = perm
                 target['obj_ids'] = shuffled_obj_ids
         return images, targets
 

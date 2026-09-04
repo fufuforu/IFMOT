@@ -12,9 +12,9 @@ python3 -m torch.distributed.launch --nproc_per_node=8 \
     --meta_arch motr_mot17_aug2_v10 \
     --use_checkpoint \
     --dataset_file e2e_joint_aug2 \
-    --epoch 100 \
+    --epoch 200 \
     --with_box_refine \
-    --lr_drop 50 \
+    --lr_drop 100 \
     --lr 2e-4 \
     --lr_backbone 2e-5 \
     --pretrained ${PRETRAIN} \
@@ -22,8 +22,8 @@ python3 -m torch.distributed.launch --nproc_per_node=8 \
     --batch_size 1 \
     --sample_mode 'random_interval' \
     --sample_interval 10 \
-    --sampler_steps 25 50 75 \
-    --sampler_lengths 2 3 4 5 \
+    --sampler_steps 50 90 150 \
+    --sampler_lengths 2 3 4 4 \
     --update_query_pos \
     --merger_dropout 0 \
     --dropout 0 \
@@ -33,4 +33,5 @@ python3 -m torch.distributed.launch --nproc_per_node=8 \
     --extra_track_attn \
     --data_txt_path_train ./datasets/data_path/joint_half.train \
     --data_txt_path_val ./datasets/data_path/mot17.train \
-    --mot_path ./data/Datasets/mot 
+    --mot_path ./data/Datasets/mot \
+    --resume /space/mawb/MOTR/exps/e2e_motr_r50_mot17_joint_half_aug2_v10/checkpoint.pth

@@ -37,7 +37,7 @@ class DetMOTDetection:
         self.sample_interval = args.sample_interval
         self.video_dict = {}
         self.split_dir = os.path.join(args.mot_path, "DanceTrack","images", "train")
-        self.frame_interval = args.frame_interval
+        # self.frame_interval = args.frame_interval
         self.labels_full = defaultdict(lambda : defaultdict(list))
         for vid in os.listdir(self.split_dir):
             if 'DPM' in vid or 'FRCNN' in vid:
@@ -65,11 +65,7 @@ class DetMOTDetection:
             t_max = max(self.labels_full[vid].keys()) + 1
             self.vid_tmax[vid] = t_max - 1
             for t in range(t_min, t_max - self.num_frames_per_batch):
-                if self.frame_interval is not None:
-                    if (t-1) % self.frame_interval == 0:
-                        self.indices.append((vid, t))
-                else:
-                    self.indices.append((vid, t))
+                self.indices.append((vid, t))
                 # self.indices.append((vid, t))
 
         self.sampler_steps: list = args.sampler_steps
@@ -173,8 +169,8 @@ class DetMOTDetection:
     def sample_indices(self, vid, f_index):
         assert self.sample_mode == 'random_interval'
         rate = randint(1, self.sample_interval + 1)
-        if self.frame_interval is not None:
-            rate = rate * self.frame_interval 
+        # if self.frame_interval is not None:
+        #     rate = rate * self.frame_interval 
         tmax = self.vid_tmax[vid]
         ids = [f_index + rate * i for i in range(self.num_frames_per_batch)]
         return [min(i, tmax) for i in ids]

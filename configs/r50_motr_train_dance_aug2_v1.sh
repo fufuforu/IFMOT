@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH --partition=3090
-#SBATCH --nodelist=3dimage-13
+#SBATCH --partition=4090
+#SBATCH --nodelist=3dimage-17
 #SBATCH --gres=gpu:8
 
 # for MOT17
 
 PRETRAIN=/space/mawb/MOTR/exps/e2e_motr_r50_dance_aug1/checkpoint0019.pth
-EXP_DIR=exps/e2e_motr_r50_dance_aug2
+EXP_DIR=exps/e2e_motr_r50_dance_aug2_v1
 python3 -m torch.distributed.launch --nproc_per_node=8 \
     --use_env main.py \
     --meta_arch motr_dance_aug2_v1 \

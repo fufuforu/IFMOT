@@ -11,3 +11,6 @@ exps/
 data/
 configs/
 datasets/
+pretrained/
+data/
+outputs/

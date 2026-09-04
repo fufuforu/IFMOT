@@ -22,6 +22,11 @@ from .motr_mot17_aug2_v6 import build as build_motr_mot17_aug2_v6
 from .motr_mot17_aug2_v7 import build as build_motr_mot17_aug2_v7
 from .motr_mot17_aug2_v8 import build as build_motr_mot17_aug2_v8
 from .motr_mot17_aug2_v10 import build as build_motr_mot17_aug2_v10
+from .motr_mot17_aug2_v11 import build as build_motr_mot17_aug2_v11
+from .motr_mot17_aug2_v12 import build as build_motr_mot17_aug2_v12
+from .motr_mot17_aug2_v14 import build as build_motr_mot17_aug2_v14
+from .motr_mot17_aug2_v15 import build as build_motr_mot17_aug2_v15
+from .motr_mot17_aug2_v16 import build as build_motr_mot17_aug2_v16
 
 from .motr_dance_aug2_v1 import build as build_motr_dance_aug2_v1
 from .motr_dance_aug2_v2 import build as build_motr_dance_aug2_v2
@@ -54,6 +59,12 @@ def build_model(args):
         'motr_mot17_aug2_v7': build_motr_mot17_aug2_v7,
         'motr_mot17_aug2_v8': build_motr_mot17_aug2_v8,
         'motr_mot17_aug2_v10': build_motr_mot17_aug2_v10,
+        'motr_mot17_aug2_v11': build_motr_mot17_aug2_v11,
+        'motr_mot17_aug2_v12': build_motr_mot17_aug2_v12,
+        'motr_mot17_aug2_v14': build_motr_mot17_aug2_v14,
+        'motr_mot17_aug2_v15': build_motr_mot17_aug2_v15,
+        'motr_mot17_aug2_v16': build_motr_mot17_aug2_v16,
+
 
 
         'motr_dance_aug2_v2_1': build_motr_dance_aug2_v2_1,
