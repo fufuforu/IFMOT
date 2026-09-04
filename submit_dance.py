@@ -94,9 +94,6 @@ def plot_one_box(x, img, color=None, label=None, score=None, line_thickness=None
     return img
 
 
-'''
-deep sort 中的画图方法，在原图上进行作画
-'''
 def draw_bboxes(ori_img, bbox, identities=None, offset=(0, 0), cvt_color=False):
     if cvt_color:
         ori_img = cv2.cvtColor(np.asarray(ori_img), cv2.COLOR_RGB2BGR)

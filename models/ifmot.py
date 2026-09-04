@@ -156,7 +156,7 @@ class ClipMatcher(SetCriterion):
 
         if unmatched_track_idxes is not None:
             ignore_mask = torch.zeros_like(target_classes, dtype=torch.bool)
-            ignore_mask[0][unmatched_track_idxes] = True  # 要忽略的位置
+            ignore_mask[0][unmatched_track_idxes] = True
             target_classes = target_classes[~ignore_mask].unsqueeze(dim=0)
             src_logits = src_logits[~ignore_mask].unsqueeze(dim=0)
 
@@ -180,11 +180,8 @@ class ClipMatcher(SetCriterion):
         return losses
 
     def match_use_features_cos(self, track_features, current_features,  all_track_query_idxes, all_gt_idxes):
-                # 对每个向量进行 L2 正则化（标准化）
         A_normalized = F.normalize(track_features, p=2, dim=1)
         B_normalized = F.normalize(current_features, p=2, dim=1)
-        # import pdb;pdb.set_trace()
-        # 计算余弦相似度
         cosine_similarity = torch.mm(A_normalized, B_normalized.t())
         C = -cosine_similarity.detach()
         C = C.to('cpu')
@@ -193,8 +190,6 @@ class ClipMatcher(SetCriterion):
         device = track_features.device
         src_idx = indices[0]
         tgt_idx = indices[1]
-        # concat src and tgt.
-        #import pdb;pdb.set_trace()
         new_matched_indices = torch.stack([all_track_query_idxes[src_idx], all_gt_idxes[tgt_idx]],
                                             dim=1).to(device)
 
@@ -202,54 +197,36 @@ class ClipMatcher(SetCriterion):
         return new_matched_indices
 
     def compute_L_intra(self,M, Nt_minus_1, Nt):
-        # 第一部分的求和 (0 ≤ i, j < Nt-1)
         L1 = M[:Nt_minus_1, :Nt_minus_1].sum()
 
-        # 第二部分的求和 (Nt-1 ≤ i, j < Nt-1 + Nt)
         start = Nt_minus_1
         end = Nt_minus_1 + Nt
         L2 = M[start:end, start:end].sum()
 
-        # 总损失
         L_intra = L1 + L2
         return L_intra
     
     def compute_L_inter(self, M, margin=0.5):
-        """
-        计算 L_id^inter 损失
-        :param M: (n, n) 处理后的张量
-        :param margin: 误差边界 m
-        :return: L_inter 标量
-        """
-        # 1. 找到每一行的最大值索引 j*
+        """Compute the inter-frame identity loss."""
         j_star = M.argmax(dim=1)  # (n,)
 
-        # 2. 计算 max_{j', j'≠j*} M_{i,j'}
         M_clone = M.clone()
-        M_clone[torch.arange(M.shape[0]), j_star] = -float('inf')  # 排除 j*
+        M_clone[torch.arange(M.shape[0]), j_star] = -float('inf')
         second_max = M_clone.max(dim=1).values  # (n,)
 
-        # 3. 计算 max(second_max + m - M_{i, j*}, 0)
         loss_terms = torch.clamp(second_max + margin - M[torch.arange(M.shape[0]), j_star], min=0)
-
-        # 4. 求和
         L_inter = loss_terms.sum()
         
         return L_inter
 
     def compute_L_cycle(self, M, Nt_minus_1, Nt):
-        """
-        计算 |M_{i,j} - M_{j,i}| 的和
-        其中 i, j 满足：Nt-1 ≤ i < Nt-1 + Nt, 0 ≤ j < Nt-1
-        """
+        """Compute the cycle-consistency loss between adjacent frames."""
         start_i, end_i = Nt_minus_1, Nt_minus_1 + Nt
         start_j, end_j = 0, Nt_minus_1
 
-        # 选取满足条件的子矩阵
         M_ij = M[start_i:end_i, start_j:end_j]
-        M_ji = M[start_j:end_j, start_i:end_i].T  # 交换 i, j 后取转置
+        M_ji = M[start_j:end_j, start_i:end_i].T
 
-        # 计算 |M_ij - M_ji| 并求和
         L_symmetry = torch.abs(M_ij - M_ji).sum()
         
         return L_symmetry
@@ -276,11 +253,9 @@ class ClipMatcher(SetCriterion):
             loss_inter = self.compute_L_inter(M, margin=0.5)
             loss_cycle = self.compute_L_cycle(M, num_old, num_new)
             sum_loss += (loss_intra + loss_inter + loss_cycle)
-        # import pdb; pdb.set_trace()
         if not isinstance(sum_loss, torch.Tensor):
             sum_loss = torch.tensor(sum_loss,dtype=torch.float32,device=new_features.device)
         loss['loss_features'] = sum_loss
-        # import pdb;pdb.set_trace()
         return loss
 
     def match_for_single_frame(self, outputs: dict, box_features):
@@ -379,7 +354,7 @@ class ClipMatcher(SetCriterion):
             self.losses_dict.update(
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
 
-        # 计算 Auxiliary Outputs Loss
+        # Auxiliary decoder losses.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 unmatched_outputs_layer = {
@@ -420,11 +395,11 @@ class ClipMatcher(SetCriterion):
             'pred_boxes': pred_boxes_i.unsqueeze(0),
         }
 
-        # 初始化当前帧匹配状态
+        # Initialize the matching state for the current frame.
         track_instances.matched_gt_idxes[:] = -1
         full_track_idxes = torch.arange(num_tracks, dtype=torch.long, device=device)
 
-        # 提取需要匹配的活跃 Track Queries, 活跃 GTs 和 纯 Detect Queries
+        # Collect active track queries, valid targets, and detection queries.
         all_track_query_mask = track_instances.obj_idxes >= 0
         all_track_query_idxes = all_track_query_mask.nonzero().flatten()
 
@@ -433,19 +408,17 @@ class ClipMatcher(SetCriterion):
         
         unmatched_detect_idxes = full_track_idxes[track_instances.obj_idxes == -1]
 
-        # 维护全局匹配 Mask，用于串联三个 Step
+        # Shared masks connect the three matching stages.
         track_matched_mask = torch.zeros(num_tracks, dtype=torch.bool, device=device)
         gt_matched_mask = torch.zeros(num_gts, dtype=torch.bool, device=device)
 
-        # --------------------------------------------------------------------------------
-        # Step 1: Confident Tracking (利用双门控融合 Cost 匹配高置信度 Track)
-        # --------------------------------------------------------------------------------
+        # Step 1: match active tracks using DFC and gated filtering.
         matched_indices_step1_list = []
         if len(all_track_query_idxes) > 0 and len(all_gt_idxes) > 0:
             out_bbox = track_instances.pred_boxes[all_track_query_idxes]
             tgt_bbox = gt_instances_i.boxes[all_gt_idxes]
             
-            # 计算 Spatial Cost (Focal Cls + L1 + GIoU)
+            # Spatial cost: focal classification, L1, and GIoU.
             out_prob = track_instances.pred_logits[all_track_query_idxes].sigmoid()
             tgt_ids = gt_instances_i.labels[all_gt_idxes]
             
@@ -466,7 +439,7 @@ class ClipMatcher(SetCriterion):
                            self.matcher.cost_class * cost_class + \
                            self.matcher.cost_giou * cost_giou
             
-            # 计算 Appearance Cost
+            # Appearance cost.
             track_features = track_instances.box_features[all_track_query_idxes]
             current_features = box_features[all_gt_idxes]
             track_features_norm = F.normalize(track_features, p=2, dim=1)
@@ -474,7 +447,7 @@ class ClipMatcher(SetCriterion):
             cos_sim = torch.mm(track_features_norm, current_features_norm.t())
             cost_app = 1.0 - cos_sim
             
-            # 动态融合权重 (基于 Top-2 相似度差值)
+            # Dynamic weight from the top-two appearance similarities.
             num_candidates = cos_sim.shape[1]
             if num_candidates > 1:
                 top2_sim, _ = torch.topk(cos_sim, k=2, dim=1)
@@ -485,7 +458,7 @@ class ClipMatcher(SetCriterion):
             alpha_weight = torch.clamp(alpha_weight, min=0.0, max=1.0).unsqueeze(1)
             cost_matrix = (1.0 - alpha_weight) * cost_spatial + alpha_weight * cost_app 
             
-            # 严格双门控 Gating
+            # Spatial and appearance gates.
             if num_candidates < 5:  
                 invalid_mask_spatial = giou_matrix < -0.1
                 invalid_mask_app = cos_sim < 0.2
@@ -518,9 +491,7 @@ class ClipMatcher(SetCriterion):
 
         matched_indices_step1 = torch.tensor(matched_indices_step1_list, dtype=torch.int64, device=device) if len(matched_indices_step1_list) > 0 else torch.empty((0, 2), dtype=torch.int64, device=device)
 
-        # --------------------------------------------------------------------------------
-        # Step 2: Spatial Recovery (也就是你需要的中间那一步！给未匹配 Track 一次纯空间降级匹配机会)
-        # --------------------------------------------------------------------------------
+        # Step 2: recover unmatched tracks using spatial cost only.
         unmatched_track_idxes_s2 = all_track_query_idxes[~track_matched_mask[all_track_query_idxes]]
         untracked_gt_idxes_s2 = all_gt_idxes[~gt_matched_mask[all_gt_idxes]]
         
@@ -532,7 +503,7 @@ class ClipMatcher(SetCriterion):
             out_prob_s2 = track_instances.pred_logits[unmatched_track_idxes_s2].sigmoid()
             tgt_ids_s2 = gt_instances_i.labels[untracked_gt_idxes_s2]
             
-            # 同样计算分类和回归的综合 Cost，但不加入外观 Cost
+            # Classification and regression costs without appearance cues.
             alpha_f = 0.25
             gamma_f = 2.0
             neg_cost_class_s2 = (1 - alpha_f) * (out_prob_s2 ** gamma_f) * (-(1 - out_prob_s2 + 1e-8).log())
@@ -550,7 +521,7 @@ class ClipMatcher(SetCriterion):
                              self.matcher.cost_class * cost_class_s2 + \
                              self.matcher.cost_giou * cost_giou_s2
 
-            # Gating: 严格过滤低空间重叠的候选框 (保留重叠度 GIoU > -0.2 的目标)
+            # Reject candidates with GIoU below -0.2.
             invalid_mask_s2 = giou_matrix_s2 < -0.2 
             cost_matrix_s2[invalid_mask_s2] = 1e6
             
@@ -565,9 +536,7 @@ class ClipMatcher(SetCriterion):
                     
         matched_indices_step2 = torch.tensor(matched_indices_step2_list, dtype=torch.int64, device=device) if len(matched_indices_step2_list) > 0 else torch.empty((0, 2), dtype=torch.int64, device=device)
 
-        # --------------------------------------------------------------------------------
-        # Step 3: Newborn Initialization (使用空闲的 Detect Queries 去捡漏剩余的新生 GT)
-        # --------------------------------------------------------------------------------
+        # Step 3: assign the remaining targets to detection queries.
         untracked_gt_idxes_s3 = all_gt_idxes[~gt_matched_mask[all_gt_idxes]]
         
         matched_indices_step3_list = []
@@ -587,25 +556,18 @@ class ClipMatcher(SetCriterion):
             src_idx = new_track_indices[0]
             tgt_idx = new_track_indices[1]
             matched_indices_step3 = torch.stack([unmatched_detect_idxes[src_idx], untracked_gt_idxes_s3[tgt_idx]], dim=1).to(device)
-            # 更新 Track Mask (对于 detect slots 的遮挡判定没有意义，但保持逻辑完整)
             track_matched_mask[unmatched_detect_idxes[src_idx]] = True
         else:
             matched_indices_step3 = torch.empty((0, 2), dtype=torch.int64, device=device)
 
-        # --------------------------------------------------------------------------------
-        # 汇总分配结果与轨迹生命周期管理
-        # --------------------------------------------------------------------------------
+        # Merge assignments and update track lifecycles.
         matched_indices = torch.cat([matched_indices_step1, matched_indices_step2, matched_indices_step3], dim=0)
-        # import pdb;pdb.set_trace()
-        # 获取在经历了 Step1 和 Step2 之后，依然没有任何匹配的 Track
         unmatched_track_idxes_final = all_track_query_idxes[~track_matched_mask[all_track_query_idxes]]
 
         if len(matched_indices) > 0:
-            # 匹配上的轨迹 (包括历史延续和新检测的)，丢失时间清零
             track_instances.disappear_time[matched_indices[:, 0]] = 0
 
         if len(unmatched_track_idxes_final) > 0:
-            # 彻底未匹配的轨迹，丢失时间累加
             track_instances.disappear_time[unmatched_track_idxes_final] += 1
 
         miss_tolerance = 3
@@ -617,9 +579,7 @@ class ClipMatcher(SetCriterion):
 
         num_disappear_track = len(unmatched_track_idxes_final) - len(true_ignore_idxes) 
 
-        # --------------------------------------------------------------------------------
-        # 状态感知特征更新 (State-aware Update of Appearance Feature, SUAF)
-        # --------------------------------------------------------------------------------
+        # State-aware Update of Appearance Feature (SUAF).
         if len(matched_indices) > 0:
             track_idx = matched_indices[:, 0]
             gt_idx = matched_indices[:, 1]
@@ -649,9 +609,7 @@ class ClipMatcher(SetCriterion):
             updated_feat = F.normalize(updated_feat, p=2, dim=1)
             track_instances.box_features[track_idx] = updated_feat.detach()
 
-        # --------------------------------------------------------------------------------
-        # 计算 IoU 与 Losses
-        # --------------------------------------------------------------------------------
+        # Compute IoU and training losses.
         active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
         active_track_boxes = track_instances.pred_boxes[active_idxes]
         if len(active_track_boxes) > 0:
@@ -1042,7 +1000,7 @@ class MOTR(nn.Module):
                 masks.append(mask)
                 pos.append(pos_l)
 
-        # 在 decoder 前保存特征
+        # Preserve encoder features for ROI feature extraction.
         if self.training:
             self.features_before_decoder = srcs
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
@@ -1098,7 +1056,6 @@ class MOTR(nn.Module):
             else:
                 raise RuntimeError("no setting of loss")
         else:
-            # import pdb;pdb.set_trace()
             frame_res['detect_instances'] = track_instances
             # each track will be assigned an unique global id by the track base.
             self.track_base.update(track_instances)
@@ -1130,19 +1087,16 @@ class MOTR(nn.Module):
         width_scale, height_scale = feature.shape[2:4]
         boxes_rescaled = boxes.clone()
         if boxes_rescaled.dim() == 1:
-            boxes_rescaled = boxes_rescaled.unsqueeze(0)  # 转为 [1, 4]
+            boxes_rescaled = boxes_rescaled.unsqueeze(0)
         boxes_rescaled[:, [0, 2]] *= width_scale  # x_min, x_max
         boxes_rescaled[:, [1, 3]] *= height_scale # y_min, y_max
         
-        # 提取 7x7 的局部特征图
+        # Extract and pool 7x7 ROI features.
         roi_feature = roi_align(feature, [boxes_rescaled], output_size=(7, 7))
         
         if boxes_rescaled.shape[0] > 0:
-            # [修改点]: 使用 GAP (Global Average Pooling) 替代 view Flatten
-            # 这样可以在保留语义信息的同时，消除特征对目标在框内绝对位置的敏感度
-            roi_feature = roi_feature.mean(dim=[2, 3])  # 维度变为 [N, C], 通常 C=256
+            roi_feature = roi_feature.mean(dim=[2, 3])
         else:
-            # 处理空张量的情况，保持维度对齐
             num_channels = feature.shape[1]
             roi_feature = torch.zeros((0, num_channels), dtype=torch.float, device=feature.device)
 
@@ -1270,7 +1224,6 @@ def build(args):
                             'frame_{}_loss_features'.format(i): args.features_loss_coef,
                             })
 
-    # TODO this is a hack
     if args.aux_loss:
         for i in range(num_frames_per_batch):
             for j in range(args.dec_layers - 1):

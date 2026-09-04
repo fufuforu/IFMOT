@@ -174,40 +174,29 @@ class DetMOTDetection:
 
 
     def transform_for_pretrain(self, images, targets):
-          # 打乱id复制n份，并做增广操作
+        # Build an augmented pseudo clip from a single frame.
         img = copy.deepcopy(images[0])
         tgt = copy.deepcopy(targets[0])
-        # import pdb;pdb.set_trace()
         obj_ids = tgt['obj_ids']
-        # 找出非 -1 的索引
         mask = obj_ids != -1
         valid_indices = torch.where(mask)[0]
         valid_values = obj_ids[valid_indices]
 
-        # 打乱这些非 -1 元素
         perm = torch.randperm(valid_values.size(0))
         shuffled_values = perm
 
-        # 构造新的 obj_ids
         shuffled_obj_ids = obj_ids.clone().long()
-        #import pdb;pdb.set_trace()
         shuffled_obj_ids[valid_indices] = shuffled_values
         tgt['obj_ids'] = shuffled_obj_ids
-        #import pdb;pdb.set_trace()
-        # 改一下boxes的格式，为了调用v2的transforms函数
         w, h = img._size
         if 'boxes' in tgt:
             tgt['boxes'] = datapoints.BoundingBox(
                 tgt['boxes'], 
                 format=datapoints.BoundingBoxFormat.XYXY, 
                 spatial_size=(h,w)) # h w
-        #rs = T.FixedMotRandomShift(self.num_frames_per_batch)
         transforms_image = T.Transforms_Image(self.num_frames_per_batch)
         transforms_video = T.Transforms_Video(self.num_frames_per_batch)
-        #import pdb;pdb.set_trace()
         video =  transforms_image([img], [tgt])
-        
-        #import pdb;pdb.set_trace()
         images, targets =  transforms_video(video)
         return images, targets
 

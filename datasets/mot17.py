@@ -37,37 +37,6 @@ class DetMOTDetection:
             self.img_files = file.readlines()
             self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
             self.img_files = list(filter(lambda x: len(x) > 0, self.img_files))
-        # def is_keep(p):
-        #     name = osp.basename(p).split('.')[0]
-        #     # import pdb;pdb.set_trace()
-        #     if "crowdhuman" in p.lower():
-        #         return True
-        #     if not name.isdigit():
-        #         return False  # 避免 int() 报错
-        # def is_keep(p):
-        #     name = osp.basename(p).split('.')[0]
-        #     # import pdb;pdb.set_trace()
-        #     if "crowdhuman" in p.lower():
-        #         return True
-        #     if not name.isdigit():
-        #         return False  # 避免 int() 报错
-
-        #     # 3. 判断 frame_interval
-        #     idx = int(name)
-        #     return (idx - 1) % self.frame_interval == 0
-        # if self.frame_interval is not None:
-        #     self.img_files = [
-        #             p for p in self.img_files 
-        #             if is_keep(p)
-        #         ]
-        #     # 3. 判断 frame_interval
-        #     idx = int(name)
-        #     return (idx - 1) % self.frame_interval == 0
-        # if self.frame_interval is not None:
-        #     self.img_files = [
-        #             p for p in self.img_files 
-        #             if is_keep(p)
-        #         ]
         self.label_files = [(x.replace('/images', '_labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
                             for x in self.img_files]
         # The number of images per sample: 1 + (num_frames - 1) * interval.
@@ -128,7 +97,6 @@ class DetMOTDetection:
     def _pre_single_frame(self, idx: int):
         img_path = self.img_files[idx]
         label_path = self.label_files[idx]
-        # import pdb;pdb.set_trace()
         if 'crowdhuman' in img_path:
             
             img_path = img_path.replace('val/','').replace('crowdhuman/images','crowdhuman/Images')
@@ -153,7 +121,6 @@ class DetMOTDetection:
             labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
             labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
             labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
-            # import pdb;pdb.set_trace()
         else:
             raise ValueError('invalid label path: {}'.format(label_path))
         if 'MOT17' in img_path:
@@ -212,13 +179,13 @@ class DetMOTDetection:
         return images, targets
 
     def transform_for_shuffle(self, images, targets):
-        for i, target in enumerate(targets): # 注意这里加了 enumerate(targets)
+        for i, target in enumerate(targets):
                 obj_ids = target['obj_ids']
                 mask = obj_ids != -1
                 valid_indices = torch.where(mask)[0]
                 valid_values = obj_ids[valid_indices]
                 
-                # 加入帧偏移 i * 10000，绝对杜绝跨帧撞号
+                # Use disjoint ID ranges for different frames.
                 perm = torch.randperm(valid_values.size(0)) + i * 10000
                 
                 shuffled_obj_ids = obj_ids.clone().long()
@@ -254,7 +221,6 @@ class DetMOTDetection:
         })
         if self.args.vis:
             data['ori_img'] = [target_i['ori_img'] for target_i in targets]
-        # import pdb;pdb.set_trace()
         return data
 
     def __len__(self):

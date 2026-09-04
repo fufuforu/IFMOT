@@ -683,7 +683,6 @@ def build(args):
                             'frame_{}_loss_giou'.format(i): args.giou_loss_coef,
                             })
 
-    # TODO this is a hack
     if args.aux_loss:
         for i in range(num_frames_per_batch):
             for j in range(args.dec_layers - 1):

@@ -156,7 +156,7 @@ def train_one_epoch_mot_ts(
     max_norm: float = 0
 ):
     model.train()
-    teacher.eval()   # teacher 永远 eval
+    teacher.eval()
     criterion.train()
     
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -167,36 +167,21 @@ def train_one_epoch_mot_ts(
 
     for data_dict in metric_logger.log_every(data_loader, print_freq, header):
         data_dict = data_dict_to_cuda(data_dict, device)
-        # data_dict.pop('gt_instances', None)
-        # =========================
-        # 1. Teacher forward (no grad)
-        # =========================
-        # import pdb;pdb.set_trace()
+        # Teacher forward pass.
         with torch.no_grad():
             teacher_outputs = teacher(data_dict)
-        # 提取 teacher pseudo tracks
-            # print(teacher_outputs)
-           
         pseudo_labels = teacher_outputs['pseudo_labels']
-        # import pdb;pdb.set_trace()
         if pseudo_labels is None:
-            continue  # teacher 这一段不稳定，直接跳过
+            continue
         data_dict['pseudo_gt'] = pseudo_labels
-        # =========================
-        # 2. Student forward
-        # =========================
-        # print(data_dict['pseudo_gt'])
-        # raise RuntimeError("over")
+        # Student forward pass.
         outputs = model(data_dict)
         loss_dict = criterion(outputs, data_dict)
-        # print("iter {} after model".format(cnt-1))
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
         
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
-        # loss_dict_reduced_unscaled = {f'{k}_unscaled': v
-        #                               for k, v in loss_dict_reduced.items()}
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items() if k in weight_dict}
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
@@ -215,10 +200,7 @@ def train_one_epoch_mot_ts(
         else:
             grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
         optimizer.step()
-        # import pdb;pdb.set_trace()
-        # metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled)
-        # metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
 
@@ -286,14 +268,10 @@ def train_one_epoch_imagenet(model: torch.nn.Module, criterion: torch.nn.Module,
             grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
         optimizer.step()
 
-        # metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled)
-        # metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
         global_step += 1
-        # import pdb;pdb.set_trace()
-
         if global_step % update_interval == 0:
             # checkpoint_path = output_dir / f'iteration{global_step}.pth'
             # utils.save_on_master({

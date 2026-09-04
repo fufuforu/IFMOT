@@ -716,15 +716,12 @@ class SanitizeBoundingBox(Tv2.SanitizeBoundingBox):
         super().__init__(*args, **kwargs)
         self._labels_getter = labels_getter
     def forward(self, *inputs: Any) -> Any:
-        #import pdb; pdb.set_trace()
         inputs = inputs if len(inputs) > 1 else inputs[0]
-        # import pdb; pdb.set_trace()
         if self._labels_getter is None:
             labels = None
         else:
             labels = self._labels_getter(inputs)
         
-        # import pdb; pdb.set_trace()
         if labels is not None:
             msg = "The labels in the input to forward() must be a tensor or None, got {type} instead."
             if isinstance(labels, torch.Tensor):
@@ -738,7 +735,6 @@ class SanitizeBoundingBox(Tv2.SanitizeBoundingBox):
                 raise ValueError(msg.format(type=type(labels)))
 
         flat_inputs, spec = tree_flatten(inputs)
-        #import pdb; pdb.set_trace()
         # TODO: this enforces one single BoundingBox entry.
         # Assuming this transform needs to be called at the end of *any* pipeline that has bboxes...
         # should we just enforce it for all transforms?? What are the benefits of *not* enforcing this?
@@ -860,7 +856,6 @@ class ConvertBox(Tv2.Transform):
 def labels_getter_func_for_mot_in_SanitizeBoundingBox(inputs):
     targets = inputs[1] # image, targets
     labels = []
-    # import pdb;pdb.set_trace()
     for k in ['labels', 'obj_ids', 'area', 'iscrowd']:
         labels.append(targets[k])
     return tuple(labels)
@@ -881,7 +876,6 @@ def mot_transform_wrap(transform_class, **args):
             params = copy.deepcopy(self._params_)
 
             if self.parent_class_name in ['RandomIoUCrop']:
-                # import pdb; pdb.set_trace()
                 if params['needs_crop']: # we need to check if one box is within the image
                     bboxes = flat_inputs[1]
                     assert isinstance(bboxes, (datapoints.BoundingBox,)), 'Not Boxes!'
@@ -900,12 +894,9 @@ def mot_transform_wrap(transform_class, **args):
         
         def forward(self, *inputs: Any) -> Any:
 
-            # if self.parent_class_name in ['SanitizeBoundingBox']:
-                # import pdb; pdb.set_trace()
             self._params_ = None
             inputs = inputs if len(inputs) > 1 else inputs[0]
             outputs = []
-            #import pdb; pdb.set_trace()
             for inp in inputs:
                 
                 output = super().forward(inp)
@@ -923,7 +914,6 @@ class Transforms_Image(object):
         video = []
         for i in range(self.bs):
             video.append((imgs[0], targets[0]))
-        #import pdb;pdb.set_trace()
         randomaffine = Tv2.RandomAffine(degrees=1, translate=[0.05, 0.05], fill=255)
         resize = Tv2.Resize(size=[640, 640], antialias=False)
         for i in range(self.bs):
@@ -946,7 +936,7 @@ class Transforms_Video(Transforms_Image):
                 randomperspective,
                 randomaffine
             ],
-            p=[0.5, 0.25, 0.25]  # 必须加起来等于1
+            p=[0.5, 0.25, 0.25]
         )
         video = randomchoice(video)
 
@@ -955,23 +945,14 @@ class Transforms_Video(Transforms_Image):
                                             # max_scale=0.5,
                                             # min_aspect_ratio=0.3,
                                             # max_aspect_ratio=3.3,
-                                            # sampler_options=[0.0, 0.1, 0.3],  # 允许低 IOU，可能完全丢失目标
                                             p=0.8)
         sanitizeboundingbox = mot_transform_wrap(SanitizeBoundingBox,min_size=1,labels_getter=labels_getter_func_for_mot_in_SanitizeBoundingBox)
         randomhorizontalfilpv2 = mot_transform_wrap(RandomHorizontalFlipv2)
         resize = mot_transform_wrap(Tv2.Resize,size=[640, 640], antialias=False)
 
-        #import pdb;pdb.set_trace()
         video = randomioucrop(video)
         video = sanitizeboundingbox(video)
         video = randomhorizontalfilpv2(video)
         video = resize(video)
-        #import pdb;pdb.set_trace()
-        #video = mottotensor(video)
-        # video = normalize(video)
-        # video = sanitizeboundingbox(video)
-        # video = convertbox(video)
-        #import pdb;pdb.set_trace()
         images, targets = zip(*video)
         return list(images), list(targets)
-    
