@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use IFMOT, please cite our paper."
+title: "IFMOT: End-to-End Multi-Object Tracking without Identity Supervision"
+type: software
+authors:
+  - family-names: Ma
+    given-names: Wenbo
+  - family-names: Liu
+    given-names: Qiankun
+  - family-names: Zhuo
+    given-names: Junbao
+  - family-names: Chen
+    given-names: Jiansheng
+  - family-names: Ma
+    given-names: Huimin
+repository-code: "https://github.com/fufuforu/IFMOT"
+license: Apache-2.0
+preferred-citation:
+  type: article
+  title: "End-to-End Multi-Object Tracking without Identity Supervision"
+  authors:
+    - family-names: Ma
+      given-names: Wenbo
+    - family-names: Liu
+      given-names: Qiankun
+    - family-names: Zhuo
+      given-names: Junbao
+    - family-names: Chen
+      given-names: Jiansheng
+    - family-names: Ma
+      given-names: Huimin
+  journal: "Pattern Recognition"
+  year: 2026
+  doi: "10.1016/j.patcog.2026.114698"

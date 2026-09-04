@@ -1,16 +1,48 @@
+# Python
 __pycache__/
-*.pth
-*.train
-exps/
-build/
+*.py[cod]
 *.egg
-*.egg-info
-*.mp4
-outputs/
-exps/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Environments and local configuration
+.env
+.env.*
+.venv/
+venv/
+
+# Native extensions and build artifacts
+build/
+dist/
+models/ops/build/
+models/ops/*.so
+
+# Datasets, checkpoints, and experiment outputs
 data/
-configs/
-datasets/
 pretrained/
-data/
+checkpoints/
+exps/
 outputs/
+results/
+runs/
+wandb/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Logs and scheduler output
+*.log
+slurm-*.out
+
+# Generated media
+*.mp4
+*.avi

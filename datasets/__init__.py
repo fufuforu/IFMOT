@@ -1,36 +1,19 @@
 # ------------------------------------------------------------------------
 # Copyright (c) 2021 megvii-model. All Rights Reserved.
 # ------------------------------------------------------------------------
-# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
-# Copyright (c) 2020 SenseTime. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-# ------------------------------------------------------------------------
 
 import torch.utils.data
-import torchvision
 
 from .coco import build as build_coco
-from .detmot import build as build_e2e_mot
-from .dance import build as build_e2e_dance
-from .imagenet import build as build_e2e_imagenet
-from .dance_pretrain import build as build_e2e_dance_pretrain
-from .dance_pretrain_v1 import build as build_e2e_dance_pretrain_v1
-from .dance_pretrain_v4 import build as build_e2e_dance_pretrain_v4
-from .static_detmot import build as build_e2e_static_mot
-from .joint import build as build_e2e_joint
-from .joint_aug1 import build as build_e2e_joint_aug1
-from .dance_aug1 import build as build_e2e_dance_aug1
-from .dance_aug2 import build as build_e2e_dance_aug2
-from .joint_aug2 import build as build_e2e_joint_aug2
-from .mot17_aug1_aug2 import build as build_e2e_mot17_aug1_aug2
+from .dancetrack import build as build_ifmot_dancetrack
+from .dancetrack_pretrain import build as build_ifmot_dancetrack_pretrain
+from .mot17 import build as build_ifmot_mot17
+from .mot17_pretrain import build as build_ifmot_mot17_pretrain
 from .torchvision_datasets import CocoDetection
+
 
 def get_coco_api_from_dataset(dataset):
     for _ in range(10):
-        # if isinstance(dataset, torchvision.datasets.CocoDetection):
-        #     break
         if isinstance(dataset, torch.utils.data.Subset):
             dataset = dataset.dataset
     if isinstance(dataset, CocoDetection):
@@ -38,36 +21,18 @@ def get_coco_api_from_dataset(dataset):
 
 
 def build_dataset(image_set, args):
-    if args.dataset_file == 'coco':
-        return build_coco(image_set, args)
+    builders = {
+        'coco': build_coco,
+        'ifmot_mot17_pretrain': build_ifmot_mot17_pretrain,
+        'ifmot_mot17': build_ifmot_mot17,
+        'ifmot_dancetrack_pretrain': build_ifmot_dancetrack_pretrain,
+        'ifmot_dancetrack': build_ifmot_dancetrack,
+    }
+
     if args.dataset_file == 'coco_panoptic':
-        # to avoid making panopticapi required for coco
         from .coco_panoptic import build as build_coco_panoptic
         return build_coco_panoptic(image_set, args)
-    if args.dataset_file == 'e2e_joint':
-        return build_e2e_joint(image_set, args)
-    if args.dataset_file == 'e2e_imagenet':
-        return build_e2e_imagenet(image_set, args)
-    if args.dataset_file == 'e2e_joint_aug1':
-        return build_e2e_joint_aug1(image_set, args)
-    if args.dataset_file == 'e2e_joint_aug2':
-        return build_e2e_joint_aug2(image_set, args)
-    if args.dataset_file == 'e2e_mot17_aug1_aug2':
-        return build_e2e_mot17_aug1_aug2(image_set, args)
-    if args.dataset_file == 'e2e_static_mot':
-        return build_e2e_static_mot(image_set, args)
-    if args.dataset_file == 'e2e_mot':
-        return build_e2e_mot(image_set, args)
-    if args.dataset_file == 'e2e_dance':
-        return build_e2e_dance(image_set, args)
-    if args.dataset_file == 'e2e_dance_pretrain':
-        return build_e2e_dance_pretrain(image_set, args)
-    if args.dataset_file == 'e2e_dance_pretrain_v1':
-        return build_e2e_dance_pretrain_v1(image_set, args)
-    if args.dataset_file == 'e2e_dance_pretrain_v4':
-        return build_e2e_dance_pretrain_v4(image_set, args)
-    if args.dataset_file == 'e2e_dance_aug1':
-        return build_e2e_dance_aug1(image_set, args)
-    if args.dataset_file == 'e2e_dance_aug2':
-        return build_e2e_dance_aug2(image_set, args)
-    raise ValueError(f'dataset {args.dataset_file} not supported')
+
+    if args.dataset_file not in builders:
+        raise ValueError(f'dataset {args.dataset_file} not supported')
+    return builders[args.dataset_file](image_set, args)

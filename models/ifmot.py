@@ -23,7 +23,7 @@ from util import box_ops, checkpoint
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate, get_rank,
                        is_dist_avail_and_initialized, inverse_sigmoid)
-
+from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from models.structures import Instances, Boxes, pairwise_iou, matched_boxlist_iou
 
 from .backbone import build_backbone
@@ -33,8 +33,8 @@ from .qim import build as build_query_interaction_layer
 from .memory_bank import build_memory_bank
 from .deformable_detr import SetCriterion, MLP
 from .segmentation import sigmoid_focal_loss
-
-
+from torchvision.ops import roi_align
+from scipy.optimize import linear_sum_assignment
 class ClipMatcher(SetCriterion):
     def __init__(self, num_classes,
                         matcher,
@@ -104,7 +104,7 @@ class ClipMatcher(SetCriterion):
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, gt_instances, indices, num_boxes, **kwargs)
 
-    def loss_boxes(self, outputs, gt_instances: List[Instances], indices: List[tuple], num_boxes):
+    def loss_boxes(self, outputs, gt_instances: List[Instances], indices: List[tuple], num_boxes,unmatched_track_idxes=None):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, h, w), normalized by the image size.
@@ -135,7 +135,7 @@ class ClipMatcher(SetCriterion):
 
         return losses
 
-    def loss_labels(self, outputs, gt_instances: List[Instances], indices, num_boxes, log=False):
+    def loss_labels(self, outputs, gt_instances: List[Instances], indices, num_boxes, log=False,unmatched_track_idxes=None):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
@@ -153,6 +153,13 @@ class ClipMatcher(SetCriterion):
             labels.append(labels_per_img)
         target_classes_o = torch.cat(labels)
         target_classes[idx] = target_classes_o
+
+        if unmatched_track_idxes is not None:
+            ignore_mask = torch.zeros_like(target_classes, dtype=torch.bool)
+            ignore_mask[0][unmatched_track_idxes] = True  # 要忽略的位置
+            target_classes = target_classes[~ignore_mask].unsqueeze(dim=0)
+            src_logits = src_logits[~ignore_mask].unsqueeze(dim=0)
+
         if self.focal_loss:
             gt_labels_target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[:, :, :-1]  # no loss for the last (background) class
             gt_labels_target = gt_labels_target.to(src_logits)
@@ -172,7 +179,111 @@ class ClipMatcher(SetCriterion):
 
         return losses
 
-    def match_for_single_frame(self, outputs: dict):
+    def match_use_features_cos(self, track_features, current_features,  all_track_query_idxes, all_gt_idxes):
+                # 对每个向量进行 L2 正则化（标准化）
+        A_normalized = F.normalize(track_features, p=2, dim=1)
+        B_normalized = F.normalize(current_features, p=2, dim=1)
+        # import pdb;pdb.set_trace()
+        # 计算余弦相似度
+        cosine_similarity = torch.mm(A_normalized, B_normalized.t())
+        C = -cosine_similarity.detach()
+        C = C.to('cpu')
+
+        indices = linear_sum_assignment(C)
+        device = track_features.device
+        src_idx = indices[0]
+        tgt_idx = indices[1]
+        # concat src and tgt.
+        #import pdb;pdb.set_trace()
+        new_matched_indices = torch.stack([all_track_query_idxes[src_idx], all_gt_idxes[tgt_idx]],
+                                            dim=1).to(device)
+
+
+        return new_matched_indices
+
+    def compute_L_intra(self,M, Nt_minus_1, Nt):
+        # 第一部分的求和 (0 ≤ i, j < Nt-1)
+        L1 = M[:Nt_minus_1, :Nt_minus_1].sum()
+
+        # 第二部分的求和 (Nt-1 ≤ i, j < Nt-1 + Nt)
+        start = Nt_minus_1
+        end = Nt_minus_1 + Nt
+        L2 = M[start:end, start:end].sum()
+
+        # 总损失
+        L_intra = L1 + L2
+        return L_intra
+    
+    def compute_L_inter(self, M, margin=0.5):
+        """
+        计算 L_id^inter 损失
+        :param M: (n, n) 处理后的张量
+        :param margin: 误差边界 m
+        :return: L_inter 标量
+        """
+        # 1. 找到每一行的最大值索引 j*
+        j_star = M.argmax(dim=1)  # (n,)
+
+        # 2. 计算 max_{j', j'≠j*} M_{i,j'}
+        M_clone = M.clone()
+        M_clone[torch.arange(M.shape[0]), j_star] = -float('inf')  # 排除 j*
+        second_max = M_clone.max(dim=1).values  # (n,)
+
+        # 3. 计算 max(second_max + m - M_{i, j*}, 0)
+        loss_terms = torch.clamp(second_max + margin - M[torch.arange(M.shape[0]), j_star], min=0)
+
+        # 4. 求和
+        L_inter = loss_terms.sum()
+        
+        return L_inter
+
+    def compute_L_cycle(self, M, Nt_minus_1, Nt):
+        """
+        计算 |M_{i,j} - M_{j,i}| 的和
+        其中 i, j 满足：Nt-1 ≤ i < Nt-1 + Nt, 0 ≤ j < Nt-1
+        """
+        start_i, end_i = Nt_minus_1, Nt_minus_1 + Nt
+        start_j, end_j = 0, Nt_minus_1
+
+        # 选取满足条件的子矩阵
+        M_ij = M[start_i:end_i, start_j:end_j]
+        M_ji = M[start_j:end_j, start_i:end_i].T  # 交换 i, j 后取转置
+
+        # 计算 |M_ij - M_ji| 并求和
+        L_symmetry = torch.abs(M_ij - M_ji).sum()
+        
+        return L_symmetry
+
+    def get_features_loss(self, new_features, old_features):
+        
+        loss = {}
+        sum_loss = 0
+        old_features = F.normalize(old_features, p=2, dim=1)
+        new_features = F.normalize(new_features, p=2, dim=1)
+        all_features = torch.cat((old_features, new_features),dim=0) 
+        cosine_similarity = torch.mm(all_features, all_features.t())
+
+        num_old = old_features.shape[0]
+        num_new = new_features.shape[0]
+
+        scale = 2 * torch.log(torch.tensor(num_new + num_old + 1.0, device=cosine_similarity.device))
+        cosine_similarity = cosine_similarity.fill_diagonal_(-float('inf')) * scale
+        M = torch.nn.functional.softmax(cosine_similarity, dim=1)
+        if torch.isnan(M).any() or M.shape[0]==0 or M.shape[1]==0:
+            pass
+        else:
+            loss_intra = self.compute_L_intra(M, num_old, num_new)
+            loss_inter = self.compute_L_inter(M, margin=0.5)
+            loss_cycle = self.compute_L_cycle(M, num_old, num_new)
+            sum_loss += (loss_intra + loss_inter + loss_cycle)
+        # import pdb; pdb.set_trace()
+        if not isinstance(sum_loss, torch.Tensor):
+            sum_loss = torch.tensor(sum_loss,dtype=torch.float32,device=new_features.device)
+        loss['loss_features'] = sum_loss
+        # import pdb;pdb.set_trace()
+        return loss
+
+    def match_for_single_frame(self, outputs: dict, box_features):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         gt_instances_i = self.gt_instances[self._current_frame_idx]  # gt instances of i-th image.
@@ -243,7 +354,7 @@ class ClipMatcher(SetCriterion):
         # step5. update obj_idxes according to the new matching result.
         track_instances.obj_idxes[new_matched_indices[:, 0]] = gt_instances_i.obj_ids[new_matched_indices[:, 1]].long()
         track_instances.matched_gt_idxes[new_matched_indices[:, 0]] = new_matched_indices[:, 1]
-
+        track_instances.box_features[new_matched_indices[:,0]] = box_features[new_matched_indices[:,1]]
         # step6. calculate iou.
         active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
         active_track_boxes = track_instances.pred_boxes[active_idxes]
@@ -268,6 +379,7 @@ class ClipMatcher(SetCriterion):
             self.losses_dict.update(
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
 
+        # 计算 Auxiliary Outputs Loss
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 unmatched_outputs_layer = {
@@ -290,6 +402,419 @@ class ClipMatcher(SetCriterion):
                          l_dict.items()})
         self._step()
         return track_instances
+
+    def match_for_single_frame_not_use_id(self, outputs: dict, box_features, last_box_features):
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
+
+        gt_instances_i = self.gt_instances[self._current_frame_idx]
+        track_instances: Instances = outputs_without_aux['track_instances']
+        pred_logits_i = track_instances.pred_logits
+        pred_boxes_i = track_instances.pred_boxes
+
+        device = pred_logits_i.device
+        num_tracks = track_instances.pred_boxes.shape[0]
+        num_gts = gt_instances_i.boxes.shape[0]
+
+        outputs_i = {
+            'pred_logits': pred_logits_i.unsqueeze(0),
+            'pred_boxes': pred_boxes_i.unsqueeze(0),
+        }
+
+        # 初始化当前帧匹配状态
+        track_instances.matched_gt_idxes[:] = -1
+        full_track_idxes = torch.arange(num_tracks, dtype=torch.long, device=device)
+
+        # 提取需要匹配的活跃 Track Queries, 活跃 GTs 和 纯 Detect Queries
+        all_track_query_mask = track_instances.obj_idxes >= 0
+        all_track_query_idxes = all_track_query_mask.nonzero().flatten()
+
+        all_gt_mask = gt_instances_i.obj_ids >= 0
+        all_gt_idxes = all_gt_mask.nonzero().flatten()
+        
+        unmatched_detect_idxes = full_track_idxes[track_instances.obj_idxes == -1]
+
+        # 维护全局匹配 Mask，用于串联三个 Step
+        track_matched_mask = torch.zeros(num_tracks, dtype=torch.bool, device=device)
+        gt_matched_mask = torch.zeros(num_gts, dtype=torch.bool, device=device)
+
+        # --------------------------------------------------------------------------------
+        # Step 1: Confident Tracking (利用双门控融合 Cost 匹配高置信度 Track)
+        # --------------------------------------------------------------------------------
+        matched_indices_step1_list = []
+        if len(all_track_query_idxes) > 0 and len(all_gt_idxes) > 0:
+            out_bbox = track_instances.pred_boxes[all_track_query_idxes]
+            tgt_bbox = gt_instances_i.boxes[all_gt_idxes]
+            
+            # 计算 Spatial Cost (Focal Cls + L1 + GIoU)
+            out_prob = track_instances.pred_logits[all_track_query_idxes].sigmoid()
+            tgt_ids = gt_instances_i.labels[all_gt_idxes]
+            
+            alpha_f = 0.25
+            gamma_f = 2.0
+            neg_cost_class = (1 - alpha_f) * (out_prob ** gamma_f) * (-(1 - out_prob + 1e-8).log())
+            pos_cost_class = alpha_f * ((1 - out_prob) ** gamma_f) * (-(out_prob + 1e-8).log())
+            cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+
+            cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
+            
+            track_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(out_bbox)
+            gt_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(tgt_bbox)
+            giou_matrix = generalized_box_iou(track_boxes_xyxy, gt_boxes_xyxy)
+            cost_giou = -giou_matrix
+            
+            cost_spatial = self.matcher.cost_bbox * cost_bbox + \
+                           self.matcher.cost_class * cost_class + \
+                           self.matcher.cost_giou * cost_giou
+            
+            # 计算 Appearance Cost
+            track_features = track_instances.box_features[all_track_query_idxes]
+            current_features = box_features[all_gt_idxes]
+            track_features_norm = F.normalize(track_features, p=2, dim=1)
+            current_features_norm = F.normalize(current_features, p=2, dim=1)
+            cos_sim = torch.mm(track_features_norm, current_features_norm.t())
+            cost_app = 1.0 - cos_sim
+            
+            # 动态融合权重 (基于 Top-2 相似度差值)
+            num_candidates = cos_sim.shape[1]
+            if num_candidates > 1:
+                top2_sim, _ = torch.topk(cos_sim, k=2, dim=1)
+                alpha_weight = top2_sim[:, 0] - top2_sim[:, 1]
+            else:
+                alpha_weight = torch.full((cos_sim.shape[0],), 0.5, device=device)
+            
+            alpha_weight = torch.clamp(alpha_weight, min=0.0, max=1.0).unsqueeze(1)
+            cost_matrix = (1.0 - alpha_weight) * cost_spatial + alpha_weight * cost_app 
+            
+            # 严格双门控 Gating
+            if num_candidates < 5:  
+                invalid_mask_spatial = giou_matrix < -0.1
+                invalid_mask_app = cos_sim < 0.2
+
+            else:
+                mu_app = cos_sim.mean(dim=1, keepdim=True)
+                std_app = cos_sim.std(dim=1, keepdim=True) if cos_sim.shape[1] > 1 else torch.zeros_like(mu_app)
+                
+                mu_giou = giou_matrix.mean(dim=1, keepdim=True)
+                std_giou = giou_matrix.std(dim=1, keepdim=True) if giou_matrix.shape[1] > 1 else torch.zeros_like(mu_giou)
+
+                invalid_mask_spatial = giou_matrix < (mu_giou - std_giou)
+                invalid_mask_app = cos_sim < (mu_app - std_app)
+
+
+            invalid_mask = invalid_mask_spatial | invalid_mask_app
+            spatial_bypass_mask = giou_matrix > 0.5 
+            final_invalid_mask = (invalid_mask ) & (~spatial_bypass_mask)
+            
+            cost_matrix[final_invalid_mask] = 1e6
+            
+            C = cost_matrix.cpu().detach().numpy()
+            row_ind, col_ind = linear_sum_assignment(C)
+            
+            for r, c in zip(row_ind, col_ind):
+                if C[r, c] < 1e5:  
+                    matched_indices_step1_list.append([all_track_query_idxes[r], all_gt_idxes[c]])
+                    track_matched_mask[all_track_query_idxes[r]] = True
+                    gt_matched_mask[all_gt_idxes[c]] = True
+
+        matched_indices_step1 = torch.tensor(matched_indices_step1_list, dtype=torch.int64, device=device) if len(matched_indices_step1_list) > 0 else torch.empty((0, 2), dtype=torch.int64, device=device)
+
+        # --------------------------------------------------------------------------------
+        # Step 2: Spatial Recovery (也就是你需要的中间那一步！给未匹配 Track 一次纯空间降级匹配机会)
+        # --------------------------------------------------------------------------------
+        unmatched_track_idxes_s2 = all_track_query_idxes[~track_matched_mask[all_track_query_idxes]]
+        untracked_gt_idxes_s2 = all_gt_idxes[~gt_matched_mask[all_gt_idxes]]
+        
+        matched_indices_step2_list = []
+        if len(unmatched_track_idxes_s2) > 0 and len(untracked_gt_idxes_s2) > 0:
+            out_bbox_s2 = track_instances.pred_boxes[unmatched_track_idxes_s2]
+            tgt_bbox_s2 = gt_instances_i.boxes[untracked_gt_idxes_s2]
+            
+            out_prob_s2 = track_instances.pred_logits[unmatched_track_idxes_s2].sigmoid()
+            tgt_ids_s2 = gt_instances_i.labels[untracked_gt_idxes_s2]
+            
+            # 同样计算分类和回归的综合 Cost，但不加入外观 Cost
+            alpha_f = 0.25
+            gamma_f = 2.0
+            neg_cost_class_s2 = (1 - alpha_f) * (out_prob_s2 ** gamma_f) * (-(1 - out_prob_s2 + 1e-8).log())
+            pos_cost_class_s2 = alpha_f * ((1 - out_prob_s2) ** gamma_f) * (-(out_prob_s2 + 1e-8).log())
+            cost_class_s2 = pos_cost_class_s2[:, tgt_ids_s2] - neg_cost_class_s2[:, tgt_ids_s2]
+            
+            cost_bbox_s2 = torch.cdist(out_bbox_s2, tgt_bbox_s2, p=1)
+            
+            track_boxes_xyxy_s2 = box_ops.box_cxcywh_to_xyxy(out_bbox_s2)
+            gt_boxes_xyxy_s2 = box_ops.box_cxcywh_to_xyxy(tgt_bbox_s2)
+            giou_matrix_s2 = generalized_box_iou(track_boxes_xyxy_s2, gt_boxes_xyxy_s2)
+            cost_giou_s2 = -giou_matrix_s2
+            
+            cost_matrix_s2 = self.matcher.cost_bbox * cost_bbox_s2 + \
+                             self.matcher.cost_class * cost_class_s2 + \
+                             self.matcher.cost_giou * cost_giou_s2
+
+            # Gating: 严格过滤低空间重叠的候选框 (保留重叠度 GIoU > -0.2 的目标)
+            invalid_mask_s2 = giou_matrix_s2 < -0.2 
+            cost_matrix_s2[invalid_mask_s2] = 1e6
+            
+            C_s2 = cost_matrix_s2.cpu().detach().numpy()
+            row_ind_s2, col_ind_s2 = linear_sum_assignment(C_s2)
+            
+            for r, c in zip(row_ind_s2, col_ind_s2):
+                if C_s2[r, c] < 1e5:
+                    matched_indices_step2_list.append([unmatched_track_idxes_s2[r], untracked_gt_idxes_s2[c]])
+                    track_matched_mask[unmatched_track_idxes_s2[r]] = True
+                    gt_matched_mask[untracked_gt_idxes_s2[c]] = True
+                    
+        matched_indices_step2 = torch.tensor(matched_indices_step2_list, dtype=torch.int64, device=device) if len(matched_indices_step2_list) > 0 else torch.empty((0, 2), dtype=torch.int64, device=device)
+
+        # --------------------------------------------------------------------------------
+        # Step 3: Newborn Initialization (使用空闲的 Detect Queries 去捡漏剩余的新生 GT)
+        # --------------------------------------------------------------------------------
+        untracked_gt_idxes_s3 = all_gt_idxes[~gt_matched_mask[all_gt_idxes]]
+        
+        matched_indices_step3_list = []
+        if len(unmatched_detect_idxes) > 0 and len(untracked_gt_idxes_s3) > 0:
+            unmatched_outputs = {
+                'pred_logits': track_instances.pred_logits[unmatched_detect_idxes].unsqueeze(0),
+                'pred_boxes': track_instances.pred_boxes[unmatched_detect_idxes].unsqueeze(0),
+            }
+            untracked_targets = {
+                'labels': gt_instances_i.labels[untracked_gt_idxes_s3],
+                'boxes': gt_instances_i.boxes[untracked_gt_idxes_s3],
+            }
+            
+            match_res = self.matcher(unmatched_outputs, [untracked_targets])
+            new_track_indices = match_res[0] 
+            
+            src_idx = new_track_indices[0]
+            tgt_idx = new_track_indices[1]
+            matched_indices_step3 = torch.stack([unmatched_detect_idxes[src_idx], untracked_gt_idxes_s3[tgt_idx]], dim=1).to(device)
+            # 更新 Track Mask (对于 detect slots 的遮挡判定没有意义，但保持逻辑完整)
+            track_matched_mask[unmatched_detect_idxes[src_idx]] = True
+        else:
+            matched_indices_step3 = torch.empty((0, 2), dtype=torch.int64, device=device)
+
+        # --------------------------------------------------------------------------------
+        # 汇总分配结果与轨迹生命周期管理
+        # --------------------------------------------------------------------------------
+        matched_indices = torch.cat([matched_indices_step1, matched_indices_step2, matched_indices_step3], dim=0)
+        # import pdb;pdb.set_trace()
+        # 获取在经历了 Step1 和 Step2 之后，依然没有任何匹配的 Track
+        unmatched_track_idxes_final = all_track_query_idxes[~track_matched_mask[all_track_query_idxes]]
+
+        if len(matched_indices) > 0:
+            # 匹配上的轨迹 (包括历史延续和新检测的)，丢失时间清零
+            track_instances.disappear_time[matched_indices[:, 0]] = 0
+
+        if len(unmatched_track_idxes_final) > 0:
+            # 彻底未匹配的轨迹，丢失时间累加
+            track_instances.disappear_time[unmatched_track_idxes_final] += 1
+
+        miss_tolerance = 3
+        if len(unmatched_track_idxes_final) > 0:
+            mask_ignore = track_instances.disappear_time[unmatched_track_idxes_final] <= miss_tolerance
+            true_ignore_idxes = unmatched_track_idxes_final[mask_ignore]
+        else:
+            true_ignore_idxes = torch.empty((0,), dtype=torch.long, device=device)
+
+        num_disappear_track = len(unmatched_track_idxes_final) - len(true_ignore_idxes) 
+
+        # --------------------------------------------------------------------------------
+        # 状态感知特征更新 (State-aware Update of Appearance Feature, SUAF)
+        # --------------------------------------------------------------------------------
+        if len(matched_indices) > 0:
+            track_idx = matched_indices[:, 0]
+            gt_idx = matched_indices[:, 1]
+            
+            track_instances.matched_gt_idxes[track_idx] = gt_idx
+            track_instances.obj_idxes[track_idx] = gt_instances_i.obj_ids[gt_idx].long()
+            
+            # Eq. (9) in the paper: beta = 0.9 and epsilon_feat = 0.6.
+            alpha_ema = 0.9
+            current_feat = box_features[gt_idx]
+            old_feat = track_instances.box_features[track_idx]
+            
+            old_feat_norm = F.normalize(old_feat, p=2, dim=1)
+            current_feat_norm = F.normalize(current_feat, p=2, dim=1)
+            sim = (old_feat_norm * current_feat_norm).sum(dim=-1, keepdim=True)
+            
+            is_similar = sim > 0.6  
+            is_initialized = (old_feat.abs().sum(dim=-1) > 0).unsqueeze(-1)
+            ema_feat = alpha_ema * old_feat + (1.0 - alpha_ema) * current_feat
+            
+            updated_feat = torch.where(
+                ~is_initialized, 
+                current_feat, 
+                torch.where(is_similar, ema_feat, old_feat)
+            )
+            
+            updated_feat = F.normalize(updated_feat, p=2, dim=1)
+            track_instances.box_features[track_idx] = updated_feat.detach()
+
+        # --------------------------------------------------------------------------------
+        # 计算 IoU 与 Losses
+        # --------------------------------------------------------------------------------
+        active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
+        active_track_boxes = track_instances.pred_boxes[active_idxes]
+        if len(active_track_boxes) > 0:
+            gt_boxes = gt_instances_i.boxes[track_instances.matched_gt_idxes[active_idxes]]
+            active_track_boxes = box_ops.box_cxcywh_to_xyxy(active_track_boxes)
+            gt_boxes = box_ops.box_cxcywh_to_xyxy(gt_boxes)
+            track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
+
+        self.num_samples += len(gt_instances_i) + num_disappear_track
+        self.sample_device = device
+        
+        for loss in self.losses:
+            new_track_loss = self.get_loss(loss,
+                                           outputs=outputs_i,
+                                           gt_instances=[gt_instances_i],
+                                           indices=[(matched_indices[:, 0], matched_indices[:, 1])],
+                                           num_boxes=1,
+                                           unmatched_track_idxes=true_ignore_idxes) 
+            self.losses_dict.update(
+                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
+                
+        new_feature_loss = self.get_features_loss(box_features, last_box_features)
+        self.losses_dict.update(
+                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_feature_loss.items()})
+
+        if 'aux_outputs' in outputs:
+            for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                for loss in self.losses:
+                    if loss == 'masks':
+                        continue
+                    l_dict = self.get_loss(loss,
+                                           aux_outputs,
+                                           gt_instances=[gt_instances_i],
+                                           indices=[(matched_indices[:, 0], matched_indices[:, 1])],
+                                           num_boxes=1, 
+                                           unmatched_track_idxes=true_ignore_idxes) 
+                    self.losses_dict.update(
+                        {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in l_dict.items()})
+                        
+        self._step()
+        return track_instances
+    
+    def match_for_single_frame_use_id(self, outputs: dict, box_features, last_box_features):
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
+
+        gt_instances_i = self.gt_instances[self._current_frame_idx]  # gt instances of i-th image.
+        track_instances: Instances = outputs_without_aux['track_instances']
+        pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
+        pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
+
+        obj_idxes = gt_instances_i.obj_ids
+        obj_idxes_list = obj_idxes.detach().cpu().numpy().tolist()
+        obj_idx_to_gt_idx = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
+        outputs_i = {
+            'pred_logits': pred_logits_i.unsqueeze(0),
+            'pred_boxes': pred_boxes_i.unsqueeze(0),
+        }
+
+        # step1. inherit and update the previous tracks.
+        num_disappear_track = 0
+        for j in range(len(track_instances)):
+            obj_id = track_instances.obj_idxes[j].item()
+            # set new target idx.
+            if obj_id >= 0:
+                if obj_id in obj_idx_to_gt_idx:
+                    track_instances.matched_gt_idxes[j] = obj_idx_to_gt_idx[obj_id]
+                else:
+                    num_disappear_track += 1
+                    track_instances.matched_gt_idxes[j] = -1  # track-disappear case.
+            else:
+                track_instances.matched_gt_idxes[j] = -1
+
+        full_track_idxes = torch.arange(len(track_instances), dtype=torch.long).to(pred_logits_i.device)
+        matched_track_idxes = (track_instances.obj_idxes >= 0)  # occu 
+        prev_matched_indices = torch.stack(
+            [full_track_idxes[matched_track_idxes], track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(
+            pred_logits_i.device)
+
+        # step2. select the unmatched slots.
+        # note that the FP tracks whose obj_idxes are -2 will not be selected here.
+        unmatched_track_idxes = full_track_idxes[track_instances.obj_idxes == -1]
+
+        # step3. select the untracked gt instances (new tracks).
+        tgt_indexes = track_instances.matched_gt_idxes
+        tgt_indexes = tgt_indexes[tgt_indexes != -1]
+
+        tgt_state = torch.zeros(len(gt_instances_i)).to(pred_logits_i.device)
+        tgt_state[tgt_indexes] = 1
+        untracked_tgt_indexes = torch.arange(len(gt_instances_i)).to(pred_logits_i.device)[tgt_state == 0]
+        # untracked_tgt_indexes = select_unmatched_indexes(tgt_indexes, len(gt_instances_i))
+        untracked_gt_instances = gt_instances_i[untracked_tgt_indexes]
+
+        def match_for_single_decoder_layer(unmatched_outputs, matcher):
+            new_track_indices = matcher(unmatched_outputs,
+                                             [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
+
+            src_idx = new_track_indices[0][0]
+            tgt_idx = new_track_indices[0][1]
+            # concat src and tgt.
+            new_matched_indices = torch.stack([unmatched_track_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
+                                              dim=1).to(pred_logits_i.device)
+            return new_matched_indices
+
+        # step4. do matching between the unmatched slots and GTs.
+        unmatched_outputs = {
+            'pred_logits': track_instances.pred_logits[unmatched_track_idxes].unsqueeze(0),
+            'pred_boxes': track_instances.pred_boxes[unmatched_track_idxes].unsqueeze(0),
+        }
+        new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, self.matcher)
+
+        # step5. update obj_idxes according to the new matching result.
+        track_instances.obj_idxes[new_matched_indices[:, 0]] = gt_instances_i.obj_ids[new_matched_indices[:, 1]].long()
+        track_instances.matched_gt_idxes[new_matched_indices[:, 0]] = new_matched_indices[:, 1]
+        track_instances.box_features[new_matched_indices[:,0]] = box_features[new_matched_indices[:,1]]
+        # step6. calculate iou.
+        active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
+        active_track_boxes = track_instances.pred_boxes[active_idxes]
+        if len(active_track_boxes) > 0:
+            gt_boxes = gt_instances_i.boxes[track_instances.matched_gt_idxes[active_idxes]]
+            active_track_boxes = box_ops.box_cxcywh_to_xyxy(active_track_boxes)
+            gt_boxes = box_ops.box_cxcywh_to_xyxy(gt_boxes)
+            track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
+
+        # step7. merge the unmatched pairs and the matched pairs.
+        matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
+
+        # step8. calculate losses.
+        self.num_samples += len(gt_instances_i) + num_disappear_track
+        self.sample_device = pred_logits_i.device
+        for loss in self.losses:
+            new_track_loss = self.get_loss(loss,
+                                           outputs=outputs_i,
+                                           gt_instances=[gt_instances_i],
+                                           indices=[(matched_indices[:, 0], matched_indices[:, 1])],
+                                           num_boxes=1)
+            self.losses_dict.update(
+                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
+        new_feature_loss = self.get_features_loss(box_features,last_box_features)
+        self.losses_dict.update(
+                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_feature_loss.items()})
+        if 'aux_outputs' in outputs:
+            for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                unmatched_outputs_layer = {
+                    'pred_logits': aux_outputs['pred_logits'][0, unmatched_track_idxes].unsqueeze(0),
+                    'pred_boxes': aux_outputs['pred_boxes'][0, unmatched_track_idxes].unsqueeze(0),
+                }
+                new_matched_indices_layer = match_for_single_decoder_layer(unmatched_outputs_layer, self.matcher)
+                matched_indices_layer = torch.cat([new_matched_indices_layer, prev_matched_indices], dim=0)
+                for loss in self.losses:
+                    if loss == 'masks':
+                        # Intermediate masks losses are too costly to compute, we ignore them.
+                        continue
+                    l_dict = self.get_loss(loss,
+                                           aux_outputs,
+                                           gt_instances=[gt_instances_i],
+                                           indices=[(matched_indices_layer[:, 0], matched_indices_layer[:, 1])],
+                                           num_boxes=1, )
+                    self.losses_dict.update(
+                        {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+                         l_dict.items()})
+        self._step()
+        return track_instances
+    
 
     def forward(self, outputs, input_data: dict):
         # losses of each frame are calculated during the model's forwarding and are outputted by the model as outputs['losses_dict].
@@ -451,6 +976,10 @@ class MOTR(nn.Module):
         self.memory_bank = memory_bank
         self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
 
+        self.features_before_decoder = None
+        self.last_box_features = None
+        self.box_features = None
+
     def _generate_empty_tracks(self):
         track_instances = Instances((1, 1))
         num_queries, dim = self.query_embed.weight.shape  # (300, 512)
@@ -471,6 +1000,7 @@ class MOTR(nn.Module):
         track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim // 2), dtype=torch.float32, device=device)
         track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
         track_instances.save_period = torch.zeros((len(track_instances), ), dtype=torch.float32, device=device)
+        track_instances.box_features = torch.zeros((len(track_instances), 256),  dtype=torch.float32, device=device)
 
         return track_instances.to(self.query_embed.weight.device)
 
@@ -512,6 +1042,9 @@ class MOTR(nn.Module):
                 masks.append(mask)
                 pos.append(pos_l)
 
+        # 在 decoder 前保存特征
+        if self.training:
+            self.features_before_decoder = srcs
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
 
         outputs_classes = []
@@ -542,7 +1075,7 @@ class MOTR(nn.Module):
         out['hs'] = hs[-1]
         return out
     
-    def _post_process_single_image(self, frame_res, track_instances, is_last):
+    def _post_process_single_image(self, frame_res, track_instances, choice_for_loss, is_last):
         with torch.no_grad():
             if self.training:
                 track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
@@ -554,12 +1087,19 @@ class MOTR(nn.Module):
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         track_instances.output_embedding = frame_res['hs'][0]
         if self.training:
-            # print((track_instances.scores>0.5).sum())
-            # raise RuntimeError("over")
             # the track id will be assigned by the mather.
             frame_res['track_instances'] = track_instances
-            track_instances = self.criterion.match_for_single_frame(frame_res)
+            if choice_for_loss == 'first_frame':
+                track_instances = self.criterion.match_for_single_frame(frame_res, self.box_features)
+            elif choice_for_loss == 'identity_free_frames':
+                track_instances = self.criterion.match_for_single_frame_not_use_id(frame_res, self.box_features, self.last_box_features)
+            elif choice_for_loss == 'identity_supervised_frames':
+                track_instances = self.criterion.match_for_single_frame_use_id(frame_res, self.box_features, self.last_box_features)
+            else:
+                raise RuntimeError("no setting of loss")
         else:
+            # import pdb;pdb.set_trace()
+            frame_res['detect_instances'] = track_instances
             # each track will be assigned an unique global id by the track base.
             self.track_base.update(track_instances)
         if self.memory_bank is not None:
@@ -578,6 +1118,36 @@ class MOTR(nn.Module):
             frame_res['track_instances'] = None
         return frame_res
 
+    def box_cxcywh_to_xyxy(self,x):
+        x_c, y_c, w, h = x.unbind(-1)
+        b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
+            (x_c + 0.5 * w), (y_c + 0.5 * h)]
+        return torch.stack(b, dim=-1)
+
+    def extract_box_feature(self, features, gt_instances):
+        feature = features[0]
+        boxes = self.box_cxcywh_to_xyxy(gt_instances.boxes).squeeze(0)
+        width_scale, height_scale = feature.shape[2:4]
+        boxes_rescaled = boxes.clone()
+        if boxes_rescaled.dim() == 1:
+            boxes_rescaled = boxes_rescaled.unsqueeze(0)  # 转为 [1, 4]
+        boxes_rescaled[:, [0, 2]] *= width_scale  # x_min, x_max
+        boxes_rescaled[:, [1, 3]] *= height_scale # y_min, y_max
+        
+        # 提取 7x7 的局部特征图
+        roi_feature = roi_align(feature, [boxes_rescaled], output_size=(7, 7))
+        
+        if boxes_rescaled.shape[0] > 0:
+            # [修改点]: 使用 GAP (Global Average Pooling) 替代 view Flatten
+            # 这样可以在保留语义信息的同时，消除特征对目标在框内绝对位置的敏感度
+            roi_feature = roi_feature.mean(dim=[2, 3])  # 维度变为 [N, C], 通常 C=256
+        else:
+            # 处理空张量的情况，保持维度对齐
+            num_channels = feature.shape[1]
+            roi_feature = torch.zeros((0, num_channels), dtype=torch.float, device=feature.device)
+
+        return roi_feature
+
     @torch.no_grad()
     def inference_single_image(self, img, ori_img_size, track_instances=None):
         if not isinstance(img, NestedTensor):
@@ -586,11 +1156,14 @@ class MOTR(nn.Module):
             track_instances = self._generate_empty_tracks()
         res = self._forward_single_image(img,
                                          track_instances=track_instances)
-        res = self._post_process_single_image(res, track_instances, False)
+        res = self._post_process_single_image(res, track_instances, 'first_frame', False)
 
         track_instances = res['track_instances']
+        detect_instances = res['detect_instances']
+        
         track_instances = self.post_process(track_instances, ori_img_size)
-        ret = {'track_instances': track_instances}
+        detect_instances = self.post_process(detect_instances, ori_img_size)
+        ret = {'track_instances': track_instances, 'detect_instances': detect_instances}
         if 'ref_pts' in res:
             ref_pts = res['ref_pts']
             img_h, img_w = ori_img_size
@@ -603,6 +1176,7 @@ class MOTR(nn.Module):
         if self.training:
             self.criterion.initialize_for_single_clip(data['gt_instances'])
         frames = data['imgs']  # list of Tensor.
+        gt_instances = data['gt_instances']
         outputs = {
             'pred_logits': [],
             'pred_boxes': [],
@@ -610,8 +1184,10 @@ class MOTR(nn.Module):
 
         track_instances = self._generate_empty_tracks()
         keys = list(track_instances._fields.keys())
-        for frame_index, frame in enumerate(frames):
+        track_instances_list = []
+        for frame_index, (frame,gt) in enumerate(zip(frames, data['gt_instances'])):
             frame.requires_grad = False
+            is_first = frame_index == 0
             is_last = frame_index == len(frames) - 1
             if self.use_checkpoint and frame_index < len(frames) - 2:
                 def fn(frame, *args):
@@ -643,12 +1219,22 @@ class MOTR(nn.Module):
             else:
                 frame = nested_tensor_from_tensor_list([frame])
                 frame_res = self._forward_single_image(frame, track_instances)
-            frame_res = self._post_process_single_image(frame_res, track_instances, is_last)
+            self.box_features = self.extract_box_feature(self.features_before_decoder, gt)
 
+            is_identity_free = data['dataset'][0] == 1
+            if is_first:
+                frame_res = self._post_process_single_image(frame_res, track_instances, 'first_frame', is_last)
+            else:
+                if is_identity_free:
+                    frame_res = self._post_process_single_image(frame_res, track_instances, 'identity_free_frames', is_last)
+                else:
+                    frame_res = self._post_process_single_image(frame_res, track_instances, 'identity_supervised_frames', is_last)
+
+            self.last_box_features = self.box_features.detach()
             track_instances = frame_res['track_instances']
             outputs['pred_logits'].append(frame_res['pred_logits'])
             outputs['pred_boxes'].append(frame_res['pred_boxes'])
-
+            track_instances_list.append(track_instances)
         if not self.training:
             outputs['track_instances'] = track_instances
         else:
@@ -660,8 +1246,8 @@ def build(args):
     dataset_to_num_classes = {
         'coco': 91,
         'coco_panoptic': 250,
-        'ifmot_mot17_pretrain': 1,
-        'ifmot_dancetrack_pretrain': 1,
+        'ifmot_mot17': 1,
+        'ifmot_dancetrack': 1,
     }
     assert args.dataset_file in dataset_to_num_classes
     num_classes = dataset_to_num_classes[args.dataset_file]
@@ -681,6 +1267,7 @@ def build(args):
         weight_dict.update({"frame_{}_loss_ce".format(i): args.cls_loss_coef,
                             'frame_{}_loss_bbox'.format(i): args.bbox_loss_coef,
                             'frame_{}_loss_giou'.format(i): args.giou_loss_coef,
+                            'frame_{}_loss_features'.format(i): args.features_loss_coef,
                             })
 
     # TODO this is a hack
