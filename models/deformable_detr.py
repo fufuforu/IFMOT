@@ -467,11 +467,12 @@ def build(args):
     num_classes = 20 if args.dataset_file != 'coco' else 91
     if args.dataset_file == "coco_panoptic":
         num_classes = 250
-    if args.dataset_file == 'mot' or args.dataset_file == 'mot_ori':
-        num_classes = 1
-    if args.dataset_file == 'e2e_mot':
-        num_classes = 1
-    if args.dataset_file == 'e2e_dance':
+    if args.dataset_file in {
+        'ifmot_mot17_pretrain',
+        'ifmot_mot17',
+        'ifmot_dancetrack_pretrain',
+        'ifmot_dancetrack',
+    }:
         num_classes = 1
     device = torch.device(args.device)
 

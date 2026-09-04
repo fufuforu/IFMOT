@@ -1,219 +1,196 @@
-# MOTR: End-to-End Multiple-Object Tracking with TRansformer
+# IFMOT: End-to-End Multi-Object Tracking without Identity Supervision
 
+<div align="center">
+
+[![Paper](https://img.shields.io/badge/Pattern%20Recognition-10.1016%2Fj.patcog.2026.114698-blue)](https://doi.org/10.1016/j.patcog.2026.114698)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
+Official PyTorch implementation of **End-to-End Multi-Object Tracking without Identity Supervision**.
+
+Wenbo Ma, Qiankun Liu, Junbao Zhuo, Jiansheng Chen, Huimin Ma
 
 </div>
 
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/motr-end-to-end-multiple-object-tracking-with/multi-object-tracking-on-mot17)](https://paperswithcode.com/sota/multi-object-tracking-on-mot17?p=motr-end-to-end-multiple-object-tracking-with)
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/motr-end-to-end-multiple-object-tracking-with/multi-object-tracking-on-mot16)](https://paperswithcode.com/sota/multi-object-tracking-on-mot16?p=motr-end-to-end-multiple-object-tracking-with)
+## Overview
 
-</div>
+IFMOT trains an end-to-end, query-based multi-object tracker without using annotated object identities from real video clips. It addresses the missing query-to-object correspondence with two components:
 
-This repository is an official implementation of the paper [MOTR: End-to-End Multiple-Object Tracking with TRansformer](https://arxiv.org/pdf/2105.03247.pdf).
+- **Hierarchy Matching Strategy (HMS):** consists of Matching with Gated Filtering (MGF), Dynamic Fusion Cost (DFC), and State-aware Update of Appearance Feature (SUAF).
+- **Neglecting Loss (NL):** does not immediately classify a temporarily unmatched tracking query as background, reducing premature track termination under occlusion.
 
-## Introduction
+This repository contains the IFMOT integration built on [MOTR](https://github.com/megvii-research/MOTR). The paper also reports an IFMOT-MOTRv2 integration; that implementation is not included in this release.
 
-**TL; DR.** MOTR is a fully end-to-end multiple-object tracking framework based on Transformer. It directly outputs the tracks within the video sequences without any association procedures.
+<p align="center">
+  <img src="figs/comparison.png" alt="Comparison of identity-supervised, two-stage identity-free, and IFMOT pipelines" width="100%">
+</p>
 
-<div style="align: center">
-<img src=./figs/motr.png/>
-</div>
+## Method
 
-**Abstract.** The key challenge in multiple-object tracking task is temporal modeling of the object under track. Existing tracking-by-detection methods adopt simple heuristics, such as spatial or appearance similarity. Such methods, in spite of their commonality, are overly simple and lack the ability to learn temporal variations from data in an end-to-end manner.In this paper, we present MOTR, a fully end-to-end multiple-object tracking framework. It learns to model the long-range temporal variation of the objects. It performs temporal association implicitly and avoids previous explicit heuristics. Built upon DETR, MOTR introduces the concept of "track query". Each track query models the entire track of an object. It is transferred and updated frame-by-frame to perform iterative predictions in a seamless manner. Tracklet-aware label assignment is proposed for one-to-one assignment between track queries and object tracks. Temporal aggregation network together with collective average loss is further proposed to enhance the long-range temporal relation. Experimental results show that MOTR achieves competitive performance and can serve as a strong Transformer-based baseline for future research.
+### Hierarchy Matching Strategy
 
-## Updates
-- (2021/09/23) Report BDD100K results and release corresponding codes [motr_bdd100k](https://github.com/megvii-model/MOTR/tree/motr_bdd100k). 
-- (2022/02/09) Higher performance achieved by not clipping the bounding boxes inside the image.
-- (2022/02/11) Add checkpoint support for training on RTX 2080ti.
-- (2022/02/11) Report [DanceTrack](https://github.com/DanceTrack/DanceTrack) results and [scripts](configs/r50_motr_train_dance.sh).
-- (2022/05/12) Higher performance achieved by removing the public detection filtering (filter_pub_det) trick.
-- (2022/07/04) MOTR is accepted by ECCV 2022.
+HMS contains three modules: **Matching with Gated Filtering (MGF)**, **Dynamic Fusion Cost (DFC)**, and **State-aware Update of Appearance Feature (SUAF)**.
 
-## Main Results
+#### Matching with Gated Filtering (MGF)
 
-### MOT17
+MGF establishes query-to-object correspondence in three steps. First, ground-truth boxes are assigned to tracking predictions using DFC, and unreliable matches are removed by spatial and appearance gates. Second, the unmatched ground-truth boxes are assigned to the remaining tracking predictions, while only matches passing the spatial gate are retained. Finally, the still-unmatched ground-truth boxes are assigned to all detection predictions to initialize new tracks.
 
-| **Method** | **Dataset** |    **Train Data**    | **HOTA** | **DetA** | **AssA** | **MOTA** | **IDF1** | **IDS** |                                           **URL**                                           |
-| :--------: | :---------: | :------------------: | :------: | :------: | :------: | :------: | :------: | :-----: | :-----------------------------------------------------------------------------------------: |
-|    MOTR    |    MOT17    | MOT17+CrowdHuman Val |   57.8   |   60.3   |   55.7   |   73.4   |   68.6   |  2439   | [model](https://drive.google.com/file/d/1K9AbtzTCBNsOD8LYA1k16kf4X0uJi8PC/view?usp=sharing) |
+#### Dynamic Fusion Cost (DFC)
 
-### DanceTrack
+DFC combines spatial and appearance information for matching. The fusion weight is determined by the difference between the two largest appearance similarities: a distinctive appearance match receives more weight, whereas an ambiguous one relies more strongly on spatial information.
 
-| **Method** | **Dataset** | **Train Data** | **HOTA** | **DetA** | **AssA** | **MOTA** | **IDF1** |                                           **URL**                                           |
-| :--------: | :---------: | :------------: | :------: | :------: | :------: | :------: | :------: | :-----------------------------------------------------------------------------------------: |
-|    MOTR    | DanceTrack  |   DanceTrack   |   54.2   |   73.5   |   40.2   |   79.7   |   51.5   | [model](https://drive.google.com/file/d/1zs5o1oK8diafVfewRl3heSVQ7-XAty3J/view?usp=sharing) |
+$$
+\mathcal{C}_{\mathrm{fusion}}=(1-\alpha)\mathcal{C}_{\mathrm{spa}}+\alpha\mathcal{C}_{\mathrm{app}},
+\qquad
+\alpha=s_{\mathrm{top1}}-s_{\mathrm{top2}}.
+$$
 
-### BDD100K
+#### State-aware Update of Appearance Feature (SUAF)
 
-| **Method** | **Dataset** | **Train Data** | **MOTA** | **IDF1** | **IDS** |                                           **URL**                                           |
-| :--------: | :---------: | :------------: | :------: | :------: | :-----: | :-----------------------------------------------------------------------------------------: |
-|    MOTR    |   BDD100K   |    BDD100K     |   32.0   |   43.5   |  3493   | [model](https://drive.google.com/file/d/13fsTj9e6Hk7qVcybWi1X5KbZEsFCHa6e/view?usp=sharing) |
+SUAF prevents unreliable observations from corrupting a track's appearance representation. The appearance feature is updated by exponential moving average only when the cosine similarity between the current observation and the stored track feature exceeds $\epsilon_{\mathrm{feat}}$. The paper uses $\beta=0.9$ and $\epsilon_{\mathrm{feat}}=0.6$.
 
-*Note:*
+### Neglecting Loss
 
-1. MOTR on MOT17 and DanceTrack is trained on 8 NVIDIA RTX 2080ti GPUs.
-2. The training time for MOT17 is about 2.5 days on V100 or 4 days on RTX 2080ti;
-3. The inference speed is about 7.5 FPS for resolution 1536x800;
-4. All models of MOTR are trained with ResNet50 with pre-trained weights on COCO dataset.
+NL avoids immediately treating an unmatched tracking query as background. Its classification loss is ignored within a short temporal tolerance window, reducing premature track termination caused by occlusion. The paper uses $\epsilon_{\mathrm{unmatch}}=3$.
 
+<p align="center">
+  <img src="figs/hms.png" alt="Dynamic Fusion Cost and gated matching in IFMOT" width="100%">
+</p>
+
+## Main results
+
+The following test-set results are reported in the paper for the MOTR-based implementation. Training uses bounding boxes but no ground-truth identities from the real video clips.
+
+| Dataset | HOTA | AssA | DetA | IDF1 | MOTA | IDS |
+|---|---:|---:|---:|---:|---:|---:|
+| DanceTrack | 53.8 | 38.0 | 76.5 | 52.3 | 85.6 | - |
+| MOT17 | 55.1 | 53.2 | 57.5 | 66.7 | 71.2 | 2,037 |
 
 ## Installation
 
-The codebase is built on top of [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR).
-
-### Requirements
-
-* Linux, CUDA>=9.2, GCC>=5.4
-  
-* Python>=3.7
-
-    We recommend you to use Anaconda to create a conda environment:
-    ```bash
-    conda create -n deformable_detr python=3.7 pip
-    ```
-    Then, activate the environment:
-    ```bash
-    conda activate deformable_detr
-    ```
-  
-* PyTorch>=1.5.1, torchvision>=0.6.1 (following instructions [here](https://pytorch.org/))
-
-    For example, if your CUDA version is 9.2, you could install pytorch and torchvision as following:
-    ```bash
-    conda install pytorch=1.5.1 torchvision=0.6.1 cudatoolkit=9.2 -c pytorch
-    ```
-  
-* Other requirements
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-* Build MultiScaleDeformableAttention
-    ```bash
-    cd ./models/ops
-    sh ./make.sh
-    ```
-
-## Usage
-
-### Dataset preparation
-
-1. Please download [MOT17 dataset](https://motchallenge.net/) and [CrowdHuman dataset](https://www.crowdhuman.org/) and organize them like [FairMOT](https://github.com/ifzhang/FairMOT) as following:
-
-```
-.
-├── crowdhuman
-│   ├── images
-│   └── labels_with_ids
-├── MOT15
-│   ├── images
-│   ├── labels_with_ids
-│   ├── test
-│   └── train
-├── MOT17
-│   ├── images
-│   ├── labels_with_ids
-├── DanceTrack
-│   ├── train
-│   ├── test
-├── bdd100k
-│   ├── images
-│       ├── track
-│           ├── train
-│           ├── val
-│   ├── labels
-│       ├── track
-│           ├── train
-│           ├── val
-
-```
-
-2. For BDD100K dataset, you can use the following script to generate txt file:
-
-
-```bash 
-cd datasets/data_path
-python3 generate_bdd100k_mot.py
-cd ../../
-```
-
-### Training and Evaluation
-
-#### Training on single node
-
-You can download COCO pretrained weights from [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR). Then training MOTR on 8 GPUs as following:
-
-```bash 
-sh configs/r50_motr_train.sh
-
-```
-
-#### Evaluation on MOT15
-
-You can download the pretrained model of MOTR (the link is in "Main Results" session), then run following command to evaluate it on MOT15 train dataset:
-
-```bash 
-sh configs/r50_motr_eval.sh
-
-```
-
-For visual in demo video, you can enable 'vis=True' in eval.py like:
-```bash 
-det.detect(vis=True)
-
-```
-
-#### Evaluation on MOT17
-
-You can download the pretrained model of MOTR (the link is in "Main Results" session), then run following command to evaluate it on MOT17 test dataset (submit to server):
+The code was developed for Linux with CUDA. Python 3.8+ is recommended. Install mutually compatible PyTorch and torchvision builds for your CUDA version; the augmentation code uses the `torchvision.datapoints` API available in torchvision 0.15.x.
 
 ```bash
-sh configs/r50_motr_submit.sh
+conda create -n ifmot python=3.8 -y
+conda activate ifmot
 
+# Install PyTorch and torchvision for your CUDA version first.
+pip install -r requirements.txt
+
+cd models/ops
+sh make.sh
+python test.py
+cd ../..
 ```
-#### Evaluation on BDD100K
 
-For BDD100K dataset, please refer [motr_bdd100k](https://github.com/megvii-model/MOTR/tree/motr_bdd100k). 
+Download the COCO-pretrained ResNet-50 Deformable DETR checkpoint from the [Deformable DETR model zoo](https://github.com/fundamentalvision/Deformable-DETR) before starting Stage 1.
 
+## Data preparation
 
-#### Test on Video Demo
+Download [MOT17](https://motchallenge.net/data/MOT17/), [DanceTrack](https://github.com/DanceTrack/DanceTrack), and [CrowdHuman](https://www.crowdhuman.org/). Convert MOT17 and CrowdHuman annotations to the normalized FairMOT/JDE `labels_with_ids` format.
 
-We also provide a demo interface which allows for a quick processing of a given video.
+The training code expects a root directory similar to:
+
+```text
+<MOT_DATA_ROOT>/
+├── MOT17/
+│   └── images/
+│       ├── train/<sequence>/img1/
+│       └── test/<sequence>/img1/
+├── MOT17_labels_with_ids/
+│   └── train/<sequence>/img1/
+├── crowdhuman/
+│   └── Images/
+├── crowdhuman_labels_with_ids/
+│   ├── train/
+│   └── val/
+└── DanceTrack/
+    ├── train/<sequence>/
+    │   ├── img1/
+    │   └── gt/gt.txt
+    └── test/<sequence>/img1/
+```
+
+The relative image lists used by MOT17/CrowdHuman are stored in `datasets/data_path/`. If your layout differs, regenerate or override the lists with `TRAIN_LIST` and `VAL_LIST`.
+
+## Training
+
+Training follows the two-stage procedure described in the paper:
+
+- **Stage 1:** create pseudo video clips by applying different augmentations to copies of one frame. The copied objects provide pseudo identities for supervised initialization.
+- **Stage 2:** fine-tune on real video clips after independently shuffling identities in every frame; cross-frame identity annotations are therefore unavailable to the matcher.
+
+All scripts default to eight GPUs with batch size 1 per GPU. Override `NPROC_PER_NODE` if needed.
+
+### MOT17
+
+Stage 1 uses MOT17 and CrowdHuman; Stage 2 uses MOT17 only.
 
 ```bash
-EXP_DIR=exps/e2e_motr_r50_joint
-python3 demo.py \
-    --meta_arch motr \
-    --dataset_file e2e_joint \
-    --epoch 200 \
-    --with_box_refine \
-    --lr_drop 100 \
-    --lr 2e-4 \
-    --lr_backbone 2e-5 \
-    --pretrained ${EXP_DIR}/motr_final.pth \
-    --output_dir ${EXP_DIR} \
-    --batch_size 1 \
-    --sample_mode 'random_interval' \
-    --sample_interval 10 \
-    --sampler_steps 50 90 120 \
-    --sampler_lengths 2 3 4 5 \
-    --update_query_pos \
-    --merger_dropout 0 \
-    --dropout 0 \
-    --random_drop 0.1 \
-    --fp_ratio 0.3 \
-    --query_interaction_layer 'QIM' \
-    --extra_track_attn \
-    --resume ${EXP_DIR}/motr_final.pth \
-    --input_video figs/demo.avi
+export MOT_DATA_ROOT=/path/to/datasets
+export PRETRAINED=/path/to/r50_deformable_detr-checkpoint.pth
+bash configs/ifmot_pretrain_mot17.sh
+
+unset PRETRAINED
+bash configs/ifmot_train_mot17.sh
 ```
 
-## Citing MOTR
-If you find MOTR useful in your research, please consider citing:
+To use a different Stage-1 checkpoint or output directory:
+
+```bash
+PRETRAINED=/path/to/stage1/checkpoint.pth \
+OUTPUT_DIR=exps/my_ifmot_mot17 \
+bash configs/ifmot_train_mot17.sh
+```
+
+### DanceTrack
+
+No external training data are used for DanceTrack.
+
+```bash
+export MOT_DATA_ROOT=/path/to/datasets
+export PRETRAINED=/path/to/r50_deformable_detr-checkpoint.pth
+bash configs/ifmot_pretrain_dancetrack.sh
+
+unset PRETRAINED
+bash configs/ifmot_train_dancetrack.sh
+```
+
+The paper uses AdamW with an initial learning rate of `2e-4`, random temporal intervals from 1 to 10, and clip lengths that grow from 2 to 5 frames. The supplied scripts reproduce these schedules.
+
+## Evaluation and submission
+
+Generate MOTChallenge-format result files with:
+
+```bash
+MOT_DATA_ROOT=/path/to/datasets \
+CHECKPOINT=exps/ifmot_mot17/checkpoint.pth \
+bash configs/ifmot_submit_mot17.sh
+```
+
+```bash
+MOT_DATA_ROOT=/path/to/datasets \
+CHECKPOINT=exps/ifmot_dancetrack/checkpoint.pth \
+bash configs/ifmot_submit_dancetrack.sh
+```
+
+Results are written under `OUTPUT_DIR/EXP_NAME` (for example, `outputs/ifmot_mot17/submission`). Evaluate them with the official [TrackEval](https://github.com/JonathonLuiten/TrackEval) protocol or submit them to the corresponding benchmark server.
+
+## Acknowledgements
+
+This project builds on [MOTR](https://github.com/megvii-research/MOTR), [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR), and the FairMOT/JDE data preparation format. We thank their authors for releasing their code.
+
+## Citation
+
 ```bibtex
-@inproceedings{zeng2021motr,
-  title={MOTR: End-to-End Multiple-Object Tracking with TRansformer},
-  author={Zeng, Fangao and Dong, Bin and Zhang, Yuang and Wang, Tiancai and Zhang, Xiangyu and Wei, Yichen},
-  booktitle={European Conference on Computer Vision (ECCV)},
-  year={2022}
+@article{ma2026ifmot,
+  title   = {End-to-End Multi-Object Tracking without Identity Supervision},
+  author  = {Ma, Wenbo and Liu, Qiankun and Zhuo, Junbao and Chen, Jiansheng and Ma, Huimin},
+  journal = {Pattern Recognition},
+  year    = {2026},
+  doi     = {10.1016/j.patcog.2026.114698}
 }
 ```
+
+## License
+
+This repository is released under the [Apache License 2.0](LICENSE).
